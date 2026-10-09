@@ -1,78 +1,46 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const VIDEO = "tI9kSZgMLsc";
+const TIMEOUT = AbortSignal.timeout(10000);
 
-interface PlayerResponse {
-  playabilityStatus?: { status?: string; reason?: string };
-  streamingData?: {
-    formats?: Array<{ mimeType?: string; url?: string; signatureCipher?: string }>;
-    adaptiveFormats?: Array<{ mimeType?: string; url?: string; signatureCipher?: string }>;
-  };
-}
-
-async function probeClient(
-  name: string,
-  clientName: string,
-  clientVersion: string,
-  extra: Record<string, unknown>,
-  headers: Record<string, string>,
-): Promise<string[]> {
+async function probeJson(label: string, url: string): Promise<string[]> {
   const lines: string[] = [];
   try {
-    const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Youtube-Client-Name": String(name === "ANDROID" ? 3 : 1),
-        "X-Youtube-Client-Version": clientVersion,
-        ...headers,
-      },
-      body: JSON.stringify({
-        context: { client: { clientName, clientVersion, hl: "pt", gl: "BR", ...extra } },
-        videoId: VIDEO,
-        contentCheckOk: true,
-        racyCheckOk: true,
-      }),
-    });
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: TIMEOUT });
     const text = await res.text();
-    lines.push(`${name} http=${res.status} len=${text.length}`);
+    lines.push(`${label} http=${res.status} len=${text.length}`);
     if (res.status !== 200) {
-      lines.push(`${name} body=${text.slice(0, 200).replace(/\s+/g, " ")}`);
+      lines.push(`${label} body=${text.slice(0, 150).replace(/\s+/g, " ")}`);
       return lines;
     }
-    const data = JSON.parse(text) as PlayerResponse;
-    lines.push(
-      `${name} playability=${data.playabilityStatus?.status ?? "?"} reason=${data.playabilityStatus?.reason ?? "-"}`,
-    );
-    const adaptive = data.streamingData?.adaptiveFormats ?? [];
-    const progressive = data.streamingData?.formats ?? [];
-    lines.push(`${name} adaptive=${adaptive.length} formats=${progressive.length}`);
-    const audio = [...adaptive, ...progressive].find((f) => (f.mimeType ?? "").startsWith("audio/"));
-    if (!audio) {
-      const any = [...adaptive, ...progressive][0];
-      lines.push(`${name} sample=${any ? any.mimeType : "nenhum formato"}`);
-      return lines;
-    }
-    lines.push(`${name} audio mime=${audio.mimeType?.slice(0, 80)}`);
-    if (audio.signatureCipher || !audio.url) {
-      lines.push(`${name} CIPHER presente (${(audio.signatureCipher ?? "").slice(0, 80)})`);
-      return lines;
-    }
-    lines.push(`${name} url host=${new URL(audio.url).host} url[0..100]=${audio.url.slice(0, 100)}`);
-
     try {
-      const dl = await fetch(audio.url, {
-        headers: { "User-Agent": headers["User-Agent"] ?? "Mozilla/5.0", Range: "bytes=0-65535" },
-      });
-      const buf = new Uint8Array(await dl.arrayBuffer());
-      lines.push(
-        `${name} googlevideo http=${dl.status} bytes=${buf.length} type=${dl.headers.get("content-type")} range=${dl.headers.get("content-range")}`,
-      );
+      const data = JSON.parse(text) as Record<string, unknown>;
+      const audio =
+        (data.audioStreams as Array<{ url?: string }> | undefined) ??
+        ((data.adaptiveFormats as Array<{ mimeType?: string; url?: string }> | undefined) ?? []).filter(
+          (f) => (f.mimeType ?? "").startsWith("audio/"),
+        );
+      if (!audio || audio.length === 0) {
+        lines.push(`${label} sem audioStreams; chaves=${Object.keys(data).slice(0, 12).join(",")}`);
+        if (typeof data.error === "string") lines.push(`${label} error=${data.error.slice(0, 120)}`);
+        if (typeof data.message === "string") lines.push(`${label} message=${data.message.slice(0, 120)}`);
+        return lines;
+      }
+      const first = audio[audio.length - 1];
+      const streamUrl = first.url ?? "";
+      lines.push(`${label} audio host=${streamUrl ? new URL(streamUrl).host : "?"} qtd=${audio.length}`);
+      if (streamUrl) {
+        const dl = await fetch(streamUrl, { headers: { Range: "bytes=0-65535" }, signal: TIMEOUT });
+        const buf = new Uint8Array(await dl.arrayBuffer());
+        lines.push(
+          `${label} stream http=${dl.status} bytes=${buf.length} type=${dl.headers.get("content-type")}`,
+        );
+      }
     } catch (error) {
-      lines.push(`${name} googlevideo ERR ${error instanceof Error ? error.message : String(error)}`);
+      lines.push(`${label} parse ERR ${error instanceof Error ? error.message : String(error)}`);
     }
   } catch (error) {
-    lines.push(`${name} ERR ${error instanceof Error ? error.message : String(error)}`);
+    lines.push(`${label} ERR ${error instanceof Error ? error.message : String(error)}`);
   }
   return lines;
 }
@@ -83,38 +51,42 @@ export default async function handler(
 ): Promise<void> {
   void request;
   response.setHeader("Content-Type", "text/plain; charset=utf-8");
-
   const lines: string[] = [];
 
-  lines.push(
-    ...(await probeClient(
-      "ANDROID",
-      "ANDROID",
-      "19.09.37",
-      { androidSdkVersion: 30, userAgent: "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
-      { "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
-    )),
-  );
+  const piped = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.ducks.party",
+  ];
+  for (const base of piped) {
+    lines.push(...(await probeJson(`piped ${new URL(base).host}`, `${base}/streams/${VIDEO}`)));
+  }
 
-  lines.push(
-    ...(await probeClient(
-      "WEB",
-      "WEB",
-      "2.20250216.01.00",
-      { userAgent: undefined as unknown as string },
-      { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36" },
-    )),
-  );
+  const invidious = [
+    "https://inv.nadeko.net",
+    "https://yewtu.be",
+    "https://invidious.nerdvpn.de",
+    "https://iv.melmac.space",
+    "https://invidious.jing.rocks",
+  ];
+  for (const base of invidious) {
+    lines.push(...(await probeJson(`inv ${new URL(base).host}`, `${base}/api/v1/videos/${VIDEO}`)));
+  }
 
-  lines.push(
-    ...(await probeClient(
-      "MWEB",
-      "MWEB",
-      "2.20250216.01.00",
-      {},
-      { "User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36" },
-    )),
-  );
+  try {
+    const res = await fetch("https://api.cobalt.tools/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${VIDEO}`, downloadMode: "audio" }),
+      signal: TIMEOUT,
+    });
+    const text = await res.text();
+    lines.push(`cobalt http=${res.status} :: ${text.slice(0, 300).replace(/\s+/g, " ")}`);
+  } catch (error) {
+    lines.push(`cobalt ERR ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   response.statusCode = 200;
   response.end(lines.join("\n"));
