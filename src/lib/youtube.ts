@@ -13,6 +13,9 @@ export interface YtDlpStatus {
 }
 
 async function describeError(response: Response): Promise<string> {
+  if (response.status === 404) {
+    return "O buscador do YouTube nao esta disponivel nesta publicacao.";
+  }
   try {
     const data = (await response.json()) as { error?: string };
     if (data.error) return data.error;

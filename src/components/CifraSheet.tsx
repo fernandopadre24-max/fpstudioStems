@@ -68,8 +68,12 @@ export function CifraSheet({
   const baseKey = useMemo(() => {
     if (cifra?.key) return cifra.key;
     if (detectedKey) {
-      // Clean detected key like "C major" -> "C", "A minor" -> "Am"
-      return detectedKey.replace(/\s*major/i, "").replace(/\s*minor/i, "m").trim();
+      // Labels vem do analisador em pt-BR ("G maior", "Am menor") ou ingles.
+      const match = detectedKey.trim().match(/^([A-G][#b]?)\s*(maior|major|menor|minor)?/i);
+      if (match) {
+        const isMinor = /menor|minor/i.test(match[2] ?? "");
+        return isMinor ? `${match[1]}m` : match[1];
+      }
     }
     return "C";
   }, [cifra?.key, detectedKey]);

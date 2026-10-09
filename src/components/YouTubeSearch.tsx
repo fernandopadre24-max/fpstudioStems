@@ -143,7 +143,8 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
       )}
       {engine === "ready" && !results && !searching && (
         <p className="yt-note">
-          Sem servidor remoto: o yt-dlp roda localmente e baixa o audio apenas para separar.
+          O audio e baixado apenas para separar os stems; a primeira busca pode
+          demorar alguns segundos enquanto o yt-dlp e preparado.
         </p>
       )}
 
