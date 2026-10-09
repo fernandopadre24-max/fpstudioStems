@@ -241,11 +241,17 @@ async function solveAnubis(pageUrl: string): Promise<string | null> {
 
 async function openInvidiousAudio(id: string): Promise<Response> {
   const apiUrl = `${INVIDIOUS_BASE}/api/v1/videos/${encodeURIComponent(id)}?local=true`;
-  const apiResponse = await fetch(apiUrl, {
-    headers: { "User-Agent": CHROME_UA, Accept: "application/json" },
-    signal: AbortSignal.timeout(25_000),
-  });
-  if (!apiResponse.ok) throw new Error(`Invidious respondeu HTTP ${apiResponse.status}.`);
+  let apiResponse: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    apiResponse = await fetch(apiUrl, {
+      headers: { "User-Agent": CHROME_UA, Accept: "application/json" },
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (apiResponse.ok) break;
+    apiResponse = null;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  if (!apiResponse) throw new Error("Invidious nao respondeu a API de video.");
   const data = (await apiResponse.json()) as {
     adaptiveFormats?: Array<{ type?: string; url?: string }>;
   };
@@ -296,7 +302,7 @@ async function openInvidiousAudio(id: string): Promise<Response> {
   throw new Error("Invidious nao retornou audio.");
 }
 
-async function streamInvidiousAudio(id: string, response: ServerResponse): Promise<void> {
+async function streamInvidiousAudio(id: string, response: ServerResponse): Promise<boolean> {
   try {
     const audioResponse = await openInvidiousAudio(id);
     response.statusCode = audioResponse.status;
@@ -308,13 +314,14 @@ async function streamInvidiousAudio(id: string, response: ServerResponse): Promi
     if (!audioResponse.body) throw new Error("Resposta de audio sem corpo.");
     const body = audioResponse.body as unknown as Parameters<typeof Readable.fromWeb>[0];
     await pipeline(Readable.fromWeb(body), response);
-  } catch (cause) {
-    const error = cause instanceof Error ? cause.message : String(cause);
-    if (!response.headersSent) {
-      sendJson(response, 502, { error });
-    } else {
+    return true;
+  } catch {
+    if (response.headersSent) {
       response.end();
+      return true;
     }
+    // falha antes dos headers: deixa o chamador tentar de novo
+    return false;
   }
 }
 
@@ -324,7 +331,12 @@ export async function streamYouTubeAudio(
 ): Promise<void> {
   const streamed = await streamYtDlpAudio(id, response);
   if (streamed) return;
-  await streamInvidiousAudio(id, response);
+  if (await streamInvidiousAudio(id, response)) return;
+  if (await streamInvidiousAudio(id, response)) return;
+  sendJson(response, 502, {
+    error:
+      "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio.",
+  });
 }
 
 function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
