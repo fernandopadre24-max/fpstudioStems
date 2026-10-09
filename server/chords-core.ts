@@ -486,7 +486,8 @@ async function fetchArchiveHtml(d: string, u: string): Promise<string | null> {
       }
     }
     if (stamps.length === 0) return null;
-    const ts = [...stamps].sort()[stamps.length - 1];
+    // usa o snapshot mais antigo (proximo da publicacao original) em vez do mais recente
+    const ts = stamps[0];
     const page = await fetch(`https://arquivo.pt/wayback/${ts}id_/${CIFRA_BASE}/${d}/${u}/`, {
       headers: {
         "User-Agent": USER_AGENT,
