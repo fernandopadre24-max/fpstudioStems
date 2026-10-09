@@ -1,0 +1,22 @@
+# Orkestra AI — estado local (nunca versionar)
+.sta/
+
+# Dependencias
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+*.log
+preview.log
+dev.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testes e caches locais
+.playwright-mcp/
+.testdata/
+.bin/
