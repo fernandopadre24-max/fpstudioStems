@@ -9,11 +9,25 @@ import type { Plugin } from "vite";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const binDir = path.join(projectRoot, ".bin");
+const distBinDir = path.join(projectRoot, "dist", "bin");
 const isWindows = process.platform === "win32";
-const binaryPath = path.join(binDir, isWindows ? "yt-dlp.exe" : "yt-dlp");
-const downloadUrl = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${
-  isWindows ? "yt-dlp.exe" : "yt-dlp"
-}`;
+const isLinux = process.platform === "linux";
+const isMac = process.platform === "darwin";
+
+// O asset "yt-dlp" comum é apenas o script Python (precisa do Python instalado).
+// Usamos os binários compilados específicos por plataforma, com versão fixa.
+const YTDLP_VERSION = "2026.08.19";
+function getBinaryName(): string {
+  if (isWindows) return "yt-dlp.exe";
+  if (isLinux) return "yt-dlp_linux";
+  if (isMac) return "yt-dlp_macos";
+  return "yt-dlp";
+}
+const binaryName = getBinaryName();
+// Em desenvolvimento local o binário fica em .bin; em produção (Vercel), em dist/bin.
+const binaryPath = path.join(distBinDir, binaryName);
+const localBinaryPath = path.join(binDir, binaryName);
+const downloadUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${binaryName}`;
 
 export interface YtDlpState {
   status: "idle" | "downloading" | "ready" | "error";
@@ -34,13 +48,17 @@ export function ensureYtDlp(): Promise<string> {
 }
 
 async function prepareYtDlp(): Promise<string> {
-  try {
-    await fs.access(binaryPath);
-    state.status = "ready";
-    state.error = null;
-    return binaryPath;
-  } catch {
-    /* precisa baixar */
+  // Prioridade: binário empacotado (produção), depois local (desenvolvimento)
+  const candidates = [binaryPath, localBinaryPath];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      state.status = "ready";
+      state.error = null;
+      return candidate;
+    } catch {
+      /* tenta o próximo */
+    }
   }
 
   state.status = "downloading";
@@ -52,14 +70,14 @@ async function prepareYtDlp(): Promise<string> {
     if (!response.ok || !response.body) {
       throw new Error(`Falha ao baixar o yt-dlp (HTTP ${response.status}).`);
     }
-    const temporary = `${binaryPath}.download`;
+    const temporary = `${localBinaryPath}.download`;
     const body = response.body as unknown as Parameters<typeof Readable.fromWeb>[0];
     await pipeline(Readable.fromWeb(body), createWriteStream(temporary));
     if (!isWindows) await fs.chmod(temporary, 0o755).catch(() => undefined);
-    await fs.rm(binaryPath, { force: true }).catch(() => undefined);
-    await fs.rename(temporary, binaryPath);
+    await fs.rm(localBinaryPath, { force: true }).catch(() => undefined);
+    await fs.rename(temporary, localBinaryPath);
     state.status = "ready";
-    return binaryPath;
+    return localBinaryPath;
   } catch (cause) {
     state.status = "error";
     state.error = cause instanceof Error ? cause.message : String(cause);
