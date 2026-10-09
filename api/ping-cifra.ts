@@ -1,58 +1,101 @@
-const USER_AGENT =
+const UA_CHROME =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-export async function GET(request: Request): Promise<Response> {
-  const lines: string[] = [];
-  const query = new URL(request.url).searchParams.get("q") ?? "legiao urbana tempo perdido";
+const TARGET = "https://www.cifraclub.com.br/legiao-urbana/tempo-perdido/";
 
-  const solr = new URL("https://solr.sscdn.co/cc/h2/select");
-  solr.searchParams.set("q", query);
-  solr.searchParams.set("wt", "json");
-  solr.searchParams.set("rows", "8");
+interface ProbeResult {
+  label: string;
+  status: number;
+  length: number;
+  hasChord: boolean;
+  server: string;
+  note: string;
+}
 
+async function probe(
+  label: string,
+  url: string,
+  headers: Record<string, string>,
+): Promise<ProbeResult> {
   try {
-    const res = await fetch(solr, {
-      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
-    });
-    const body = await res.text();
-    lines.push(`solr status=${res.status} len=${body.length}`);
-    lines.push(`solr body[0..300]=${body.slice(0, 300)}`);
-    const start = body.indexOf("{");
-    const end = body.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        const data = JSON.parse(body.slice(start, end + 1)) as {
-          response?: { docs?: Array<{ m?: string; a?: string; d?: string; u?: string }> };
-        };
-        const docs = data.response?.docs ?? [];
-        lines.push(`docs=${docs.length}`);
-        for (const doc of docs.slice(0, 3)) {
-          lines.push(`doc d=${doc.d} u=${doc.u} m=${doc.m}`);
-        }
-        const doc = docs[0];
-        if (doc && doc.d && doc.u) {
-          const url = `https://www.cifraclub.com.br/${doc.d}/${doc.u}/`;
-          const page = await fetch(url, {
-            headers: {
-              "User-Agent": USER_AGENT,
-              Accept: "text/html,application/xhtml+xml,*/*",
-              "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-            },
-          });
-          const html = await page.text();
-          lines.push(`page status=${page.status} len=${html.length}`);
-          lines.push(`page has data-chord-content=${html.includes('data-chord-content="true"')}`);
-          lines.push(`page has cifra_tom=${html.includes("cifra_tom")}`);
-          lines.push(`page has strummings=${html.includes("strummings")}`);
-          lines.push(`page[0..200]=${html.slice(0, 200).replace(/\s+/g, " ")}`);
-        }
-      } catch (error) {
-        lines.push(`json ERR ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    const res = await fetch(url, { headers, redirect: "follow" });
+    const html = await res.text();
+    return {
+      label,
+      status: res.status,
+      length: html.length,
+      hasChord: html.includes('data-chord-content="true"'),
+      server: res.headers.get("server") ?? "-",
+      note: html.slice(0, 120).replace(/\s+/g, " "),
+    };
   } catch (error) {
-    lines.push(`solr ERR ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      label,
+      status: 0,
+      length: 0,
+      hasChord: false,
+      server: "-",
+      note: error instanceof Error ? error.message : String(error),
+    };
   }
+}
+
+export async function GET(): Promise<Response> {
+  const browserHeaders: Record<string, string> = {
+    "User-Agent": UA_CHROME,
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+  };
+
+  const results: ProbeResult[] = [];
+
+  results.push(
+    await probe("1 chrome simples", TARGET, {
+      "User-Agent": UA_CHROME,
+      Accept: "text/html,application/xhtml+xml,*/*",
+      "Accept-Language": "pt-BR,pt;q=0.9",
+    }),
+  );
+  results.push(await probe("2 chrome completo", TARGET, browserHeaders));
+  results.push(await probe("3 sem headers", TARGET, {}));
+  results.push(await probe("4 UA curl", TARGET, { "User-Agent": "curl/8.5.0" }));
+  results.push(
+    await probe(
+      "5 googlebot",
+      TARGET,
+      { "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" },
+    ),
+  );
+  results.push(
+    await probe(
+      "6 host sem www",
+      "https://cifraclub.com.br/legiao-urbana/tempo-perdido/",
+      browserHeaders,
+    ),
+  );
+  results.push(
+    await probe(
+      "7 archive.org",
+      "https://web.archive.org/web/2024id_/" + TARGET,
+      { "User-Agent": UA_CHROME },
+    ),
+  );
+
+  const lines = results.map(
+    (r) =>
+      `${r.label} -> status=${r.status} len=${r.length} chord=${r.hasChord} server=${r.server}\n   ${r.note}`,
+  );
 
   return new Response(lines.join("\n"), {
     headers: { "Content-Type": "text/plain; charset=utf-8" },
