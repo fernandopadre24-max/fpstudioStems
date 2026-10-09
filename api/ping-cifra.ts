@@ -1,41 +1,39 @@
 const UA_CHROME =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-const TARGET_PATH = "www.cifraclub.com.br/legiao-urbana/tempo-perdido/";
-
-async function probe(label: string, url: string): Promise<string> {
-  try {
-    const res = await fetch(url, { headers: { "User-Agent": UA_CHROME, Accept: "*/*" } });
-    const body = await res.text();
-    return `${label} -> status=${res.status} len=${body.length} :: ${body
-      .slice(0, 160)
-      .replace(/\s+/g, " ")}`;
-  } catch (error) {
-    return `${label} -> ERR ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
+const STAMP = "20240511124339";
+const TARGET = "https://www.cifraclub.com.br/legiao-urbana/tempo-perdido/";
 
 export async function GET(): Promise<Response> {
   const lines: string[] = [];
 
-  for (const collection of ["CC-MAIN-2026-39", "CC-MAIN-2026-33", "CC-MAIN-2026-26"]) {
-    lines.push(
-      await probe(
-        `cc ${collection}`,
-        `https://index.commoncrawl.org/${collection}-index?url=${encodeURIComponent(TARGET_PATH)}&output=json&limit=1&matchType=exact`,
-      ),
-    );
+  let html = "";
+  try {
+    const res = await fetch(`https://arquivo.pt/wayback/${STAMP}id_/${TARGET}`, {
+      headers: { "User-Agent": UA_CHROME, Accept: "text/html" },
+    });
+    html = await res.text();
+    lines.push(`fetch status=${res.status} len=${html.length}`);
+  } catch (error) {
+    lines.push(`fetch ERR ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  lines.push(await probe("adonay", "https://www.adonay.com.br/"));
-  lines.push(await probe("cifras.com", "https://cifras.com/"));
-  lines.push(await probe("tudocifra", "https://www.tudocifra.com/"));
-  lines.push(
-    await probe(
-      "acordesweb busca",
-      `https://acordesweb.com/resultados.php?busca=tempo%20perdido%20legiao%20urbana`,
-    ),
-  );
+  if (html) {
+    const preAt = html.indexOf("<pre");
+    if (preAt >= 0) {
+      const preEnd = html.indexOf("</pre>", preAt);
+      const pre = html.slice(preAt, preEnd > 0 ? preEnd + 6 : preAt + 6000);
+      lines.push(`PRE total=${pre.length}`);
+      lines.push(`PRE[0..4000]=${pre.slice(0, 4000).replace(/\n/g, "\\n")}`);
+    }
+
+    const partAt = html.indexOf("Primeira Parte");
+    if (partAt >= 0) {
+      lines.push(
+        `CTX parte = ${html.slice(Math.max(0, partAt - 500), partAt + 500).replace(/\n/g, "\\n")}`,
+      );
+    }
+  }
 
   return new Response(lines.join("\n"), {
     headers: { "Content-Type": "text/plain; charset=utf-8" },
