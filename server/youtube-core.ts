@@ -348,7 +348,7 @@ function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean
           executable,
           [
             "-f",
-            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             "-o",
             "-",
             "--no-playlist",
@@ -360,12 +360,13 @@ function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean
         );
 
         let started = false;
+        let contentType = "audio/webm";
 
         child.stdout.on("data", (chunk: Buffer) => {
           if (!started) {
             started = true;
             response.statusCode = 200;
-            response.setHeader("Content-Type", "audio/mp4");
+            response.setHeader("Content-Type", contentType);
             response.setHeader("Cache-Control", "no-store");
           }
           response.write(chunk);

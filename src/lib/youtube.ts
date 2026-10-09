@@ -52,5 +52,6 @@ export async function downloadYouTubeAudio(id: string, title: string): Promise<F
   const blob = await response.blob();
   if (blob.size === 0) throw new Error("O YouTube nao retornou audio para este video.");
   const safe = title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80);
-  return new File([blob], `${safe || id}.m4a`, { type: "audio/mp4" });
+  const ext = blob.type.includes("webm") ? "webm" : "m4a";
+  return new File([blob], `${safe || id}.${ext}`, { type: blob.type });
 }
