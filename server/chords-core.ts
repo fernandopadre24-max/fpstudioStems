@@ -31,6 +31,7 @@ export interface CifraResult {
   strummings: CifraStrumming[];
   blocks: CifraBlock[];
   rawText: string;
+  archived?: boolean;
 }
 
 interface SolrDoc {
@@ -127,9 +128,117 @@ function parseStrummings(html: string): CifraStrumming[] {
   return strummings;
 }
 
+function parseCifraLegacy(
+  html: string,
+): { key: string | null; strummings: CifraStrumming[]; blocks: CifraBlock[]; rawText: string } {
+  const toneMatch =
+    html.match(/id="cifra_tom"[^>]*>[\s\S]*?<a[^>]*>([^<]+)/) ||
+    html.match(/id="cifra_tom"[^>]*>([^<]+)/);
+  const key = toneMatch ? decodeEntities(toneMatch[1]).trim() : null;
+
+  const blocks: CifraBlock[] = [];
+  const out: string[] = [];
+  if (key) {
+    out.push(`Tom: ${key}`);
+    out.push("");
+  }
+
+  const preMatch = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/);
+  if (!preMatch) return { key, strummings: [], blocks, rawText: out.join("\n").trim() };
+
+  const content = preMatch[1];
+  const segments: Array<{ kind: "tab"; html: string } | { kind: "line"; html: string }> = [];
+  const tabMarker = '<span class="tablatura">';
+  let cursor = 0;
+  while (cursor < content.length) {
+    const tabAt = content.indexOf(tabMarker, cursor);
+    const chunk = tabAt < 0 ? content.slice(cursor) : content.slice(cursor, tabAt);
+    if (chunk) {
+      for (const line of chunk.split("\n")) segments.push({ kind: "line", html: line });
+    }
+    if (tabAt < 0) break;
+    const tabEnd = content.indexOf("</span></span>", tabAt);
+    const end = tabEnd < 0 ? content.length : tabEnd + "</span></span>".length;
+    segments.push({ kind: "tab", html: content.slice(tabAt, end) });
+    cursor = end;
+  }
+
+  let pendingChord: string | null = null;
+  const flushPending = (): void => {
+    if (pendingChord === null) return;
+    blocks.push({ type: "verse", chords: pendingChord, text: "" });
+    out.push(pendingChord);
+    out.push("");
+    pendingChord = null;
+  };
+
+  for (const segment of segments) {
+    if (segment.kind === "tab") {
+      flushPending();
+      const cntTag = '<span class="cnt">';
+      const cntAt = segment.html.indexOf(cntTag);
+      const cntRaw =
+        cntAt >= 0 ? segment.html.slice(cntAt + cntTag.length) : segment.html.replace(/<[^>]+>/g, "");
+      const tabText = decodeEntities(stripTags(cntRaw)).replace(/_{2,}/g, "").replace(/\s+$/, "");
+      if (tabText) {
+        blocks.push({ type: "tab", chords: null, text: tabText });
+        out.push(tabText);
+        out.push("");
+      }
+      continue;
+    }
+
+    const line = segment.html;
+    const hasChord = line.includes("<b");
+    const plain = decodeEntities(stripTags(chordToPlainText(line))).replace(/_{2,}/g, "").replace(/\s+$/, "");
+
+    if (!hasChord) {
+      const trimmed = plain.trim();
+      if (!trimmed) {
+        flushPending();
+        continue;
+      }
+      if (/^\[[^\]]+\]$/.test(trimmed)) {
+        flushPending();
+        blocks.push({ type: "section", title: trimmed, chords: null, text: trimmed });
+        out.push(trimmed);
+        out.push("");
+        continue;
+      }
+      if (pendingChord !== null) {
+        blocks.push({ type: "verse", chords: pendingChord, text: plain });
+        out.push(pendingChord);
+        out.push(plain);
+        out.push("");
+        pendingChord = null;
+      } else {
+        blocks.push({ type: "verse", chords: null, text: plain });
+        out.push(plain);
+        out.push("");
+      }
+      continue;
+    }
+
+    if (/^\s*\[[^\]]+\]/.test(plain)) {
+      flushPending();
+      blocks.push({ type: "intro", chords: plain.trim(), text: "" });
+      out.push(plain.trim());
+      out.push("");
+      continue;
+    }
+    flushPending();
+    pendingChord = plain;
+  }
+  flushPending();
+
+  const rawText = out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { key, strummings: [], blocks, rawText };
+}
+
 function parseCifra(
   html: string,
 ): { key: string | null; strummings: CifraStrumming[]; blocks: CifraBlock[]; rawText: string } {
+  if (!html.includes('data-chord-content')) return parseCifraLegacy(html);
   const toneMatch =
     html.match(/data-anchor="--chord-tone"[^>]*>([^<]+)/) ||
     html.match(/id="cifra_tom"[^>]*>[\s\S]*?<a[^>]*>([^<]+)/);
@@ -325,30 +434,112 @@ async function searchSongs(query: string): Promise<SolrDoc[]> {
   }
 }
 
-async function loadCifra(doc: SolrDoc): Promise<CifraResult | null> {
-  if (!doc.d || !doc.u) return null;
-  const url = `${CIFRA_BASE}/${doc.d}/${doc.u}/`;
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": USER_AGENT,
-      Accept: "text/html,application/xhtml+xml,*/*",
-      "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    },
-  });
-  if (!response.ok) return null;
-  const html = await response.text();
-  const { key, strummings, blocks, rawText } = parseCifra(html);
-  if (blocks.length === 0) return null;
-  return {
-    source: "cifraclub",
-    title: doc.m ?? doc.u,
-    artist: doc.a ?? doc.d,
-    key,
-    url,
-    strummings,
-    blocks,
-    rawText,
+async function fetchLiveHtml(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      },
+    });
+    if (!response.ok) return null;
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchArchiveHtml(d: string, u: string): Promise<string | null> {
+  const cdxUrl =
+    "https://arquivo.pt/wayback/cdx?url=" +
+    encodeURIComponent(`cifraclub.com.br/${d}/${u}/`) +
+    "&output=json";
+  try {
+    const res = await fetch(cdxUrl, {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    const stamps: string[] = [];
+    const take = (row: { timestamp?: string; status?: string }): void => {
+      if (row.timestamp && (!row.status || row.status === "200")) stamps.push(row.timestamp);
+    };
+    if (text.trim().startsWith("[")) {
+      try {
+        for (const row of JSON.parse(text.trim()) as Array<{ timestamp?: string; status?: string }>) {
+          take(row);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (stamps.length === 0) {
+      for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{")) continue;
+        try {
+          take(JSON.parse(trimmed) as { timestamp?: string; status?: string });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    if (stamps.length === 0) return null;
+    const ts = [...stamps].sort()[stamps.length - 1];
+    const page = await fetch(`https://arquivo.pt/wayback/${ts}id_/${CIFRA_BASE}/${d}/${u}/`, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      },
+    });
+    if (!page.ok) return null;
+    return await page.text();
+  } catch {
+    return null;
+  }
+}
+
+async function loadCifra(doc: SolrDoc, forceArchive = false): Promise<CifraResult | null> {
+  const dir = doc.d;
+  const slug = doc.u;
+  if (!dir || !slug) return null;
+  const url = `${CIFRA_BASE}/${dir}/${slug}/`;
+
+  const finish = (
+    html: string,
+    archived: boolean,
+  ): CifraResult | null => {
+    const { key, strummings, blocks, rawText } = parseCifra(html);
+    if (blocks.length === 0) return null;
+    return {
+      source: "cifraclub",
+      title: doc.m ?? slug,
+      artist: doc.a ?? dir,
+      key,
+      url,
+      strummings,
+      blocks,
+      rawText,
+      ...(archived ? { archived: true } : {}),
+    };
   };
+
+  if (!forceArchive) {
+    const live = await fetchLiveHtml(url);
+    if (live) {
+      const result = finish(live, false);
+      if (result) return result;
+    }
+  }
+
+  const archived = await fetchArchiveHtml(dir, slug);
+  if (archived) {
+    const result = finish(archived, true);
+    if (result) return result;
+  }
+  return null;
 }
 
 const cache = new Map<string, CifraResult | null>();
@@ -363,6 +554,7 @@ export async function handleChordsApi(
     const title = requestUrl.searchParams.get("title")?.trim() ?? "";
     const artist = requestUrl.searchParams.get("artist")?.trim() ?? "";
     const qParam = requestUrl.searchParams.get("q")?.trim() ?? "";
+    const forceArchive = requestUrl.searchParams.get("source")?.trim() === "archive";
     const query = qParam || [artist, title].filter(Boolean).join(" ") || title;
 
     if (!query) {
@@ -370,8 +562,9 @@ export async function handleChordsApi(
       return;
     }
 
-    if (cache.has(query)) {
-      const cached = cache.get(query) ?? null;
+    const cacheKey = `${forceArchive ? "archive:" : ""}${query}`;
+    if (cache.has(cacheKey)) {
+      const cached = cache.get(cacheKey) ?? null;
       if (cached) sendJson(response, 200, cached);
       else sendJson(response, 404, { error: "Nenhuma cifra encontrada no Cifra Club." });
       return;
@@ -379,7 +572,7 @@ export async function handleChordsApi(
 
     const docs = await searchSongs(query);
     if (docs.length === 0) {
-      cache.set(query, null);
+      cache.set(cacheKey, null);
       sendJson(response, 404, { error: "Nenhuma cifra encontrada no Cifra Club." });
       return;
     }
@@ -397,10 +590,10 @@ export async function handleChordsApi(
 
     let result: CifraResult | null = null;
     for (const doc of ranked.slice(0, 3)) {
-      result = await loadCifra(doc);
+      result = await loadCifra(doc, forceArchive);
       if (result) break;
     }
-    cache.set(query, result);
+    cache.set(cacheKey, result);
     if (!result) {
       sendJson(response, 404, { error: "Nenhuma cifra encontrada no Cifra Club." });
       return;
