@@ -15,60 +15,52 @@ export default async function handler(
     headers: { "User-Agent": UA, Accept: "application/json" },
     signal: AbortSignal.timeout(20000),
   });
-  const data = (await api.json()) as {
-    adaptiveFormats?: Array<{ type?: string; url?: string }>;
-  };
+  const data = (await api.json()) as { adaptiveFormats?: Array<{ type?: string; url?: string }> };
   const audio = (data.adaptiveFormats ?? []).find((f) => (f.type ?? "").startsWith("audio/"));
   if (!audio?.url) {
     response.end("sem audio");
     return;
   }
-  lines.push(`url[0..160]=${audio.url.slice(0, 160)}`);
 
-  const attempts: Array<{ label: string; init: RequestInit }> = [
-    { label: "A sem headers", init: { signal: AbortSignal.timeout(20000) } },
-    {
-      label: "B range+UA",
-      init: { headers: { "User-Agent": UA, Range: "bytes=0-65535" }, signal: AbortSignal.timeout(20000) },
-    },
-    {
-      label: "C UA+referer",
-      init: {
-        headers: { "User-Agent": UA, Referer: "https://www.youtube.com/", Origin: "https://www.youtube.com" },
-        signal: AbortSignal.timeout(20000),
-      },
-    },
-    {
-      label: "D range so",
-      init: { headers: { Range: "bytes=0-65535" }, signal: AbortSignal.timeout(20000) },
-    },
-    {
-      label: "E redirect manual",
-      init: { redirect: "manual", headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) },
-    },
+  const hop1 = await fetch(audio.url, {
+    redirect: "manual",
+    headers: { "User-Agent": UA },
+    signal: AbortSignal.timeout(20000),
+  });
+  lines.push(`hop1 http=${hop1.status}`);
+  const location = hop1.headers.get("location") ?? "";
+  lines.push(`loc len=${location.length} ipbypass=${location.includes("ipbypass=yes")} mip=${location.includes("mip=")}`);
+  lines.push(`loc=${location.slice(0, 700)}`);
+
+  if (!location) {
+    response.end(lines.join("\n"));
+    return;
+  }
+
+  const hop2variants: Array<{ label: string; init: RequestInit }> = [
+    { label: "hop2 manual+UA", init: { redirect: "manual", headers: { "User-Agent": UA }, signal: AbortSignal.timeout(25000) } },
+    { label: "hop2 auto+UA", init: { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(25000) } },
+    { label: "hop2 auto+range", init: { headers: { "User-Agent": UA, Range: "bytes=0-65535" }, signal: AbortSignal.timeout(25000) } },
   ];
 
-  for (const attempt of attempts) {
+  for (const variant of hop2variants) {
     try {
-      const res = await fetch(audio.url, attempt.init);
-      const ct = res.headers.get("content-type");
-      let bodyNote = "";
-      if (res.status !== 200 && res.status !== 206 && res.status !== 302) {
-        const text = await res.text();
-        bodyNote = ` :: ${text.slice(0, 200).replace(/\s+/g, " ")}`;
-      } else if (res.status === 302) {
-        bodyNote = ` :: loc=${(res.headers.get("location") ?? "").slice(0, 140)}`;
-      } else {
+      const res = await fetch(location, variant.init);
+      let note = "";
+      if (res.status === 200 || res.status === 206) {
         const buf = new Uint8Array(await res.arrayBuffer());
-        bodyNote = ` :: bytes=${buf.length}`;
+        note = ` bytes=${buf.length}`;
+      } else if (res.status >= 300 && res.status < 400) {
+        note = ` loc2=${(res.headers.get("location") ?? "").slice(0, 200)}`;
+      } else {
+        const text = await res.text();
+        note = ` body=${text.slice(0, 250).replace(/\s+/g, " ")}`;
       }
-      lines.push(
-        `${attempt.label} http=${res.status} type=${ct} loc=${res.headers.get("content-location") ?? "-"}${bodyNote}`,
-      );
+      lines.push(`${variant.label} http=${res.status} type=${res.headers.get("content-type")}${note}`);
     } catch (error) {
       const cause = (error as { cause?: { code?: string } }).cause;
       lines.push(
-        `${attempt.label} ERR ${error instanceof Error ? error.message : String(error)} cause=${cause?.code ?? "-"}`,
+        `${variant.label} ERR ${error instanceof Error ? error.message : String(error)} cause=${cause?.code ?? "-"}`,
       );
     }
   }
