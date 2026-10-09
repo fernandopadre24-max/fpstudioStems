@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import { handleChordsApi } from "./chords-core.ts";
+import { handleChordsApi } from "./chords-core";
 
 export function chordsApiPlugin(): Plugin {
   const middleware = async (

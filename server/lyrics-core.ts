@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { sendJson } from "./http.ts";
+import { sendJson } from "./http";
 
 interface LrclibRecord {
   id?: number;
