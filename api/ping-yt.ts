@@ -1,7 +1,50 @@
+import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const VIDEO = "tI9kSZgMLsc";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+function httpsGet(
+  url: string,
+  family: 4 | 6 | undefined,
+  maxBytes: number,
+): Promise<{ status: number; bytes: number; type: string; error?: string }> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      url,
+      { family, timeout: 25000, headers: { "User-Agent": UA, Range: "bytes=0-262143" } },
+      (res: IncomingMessage) => {
+        let bytes = 0;
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          resolve({
+            status: res.statusCode ?? 0,
+            bytes,
+            type: String(res.headers["content-type"] ?? "-"),
+          });
+        };
+        res.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes >= maxBytes) {
+            req.destroy();
+            finish();
+          }
+        });
+        res.on("close", finish);
+        res.on("end", finish);
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ status: 0, bytes: 0, type: "-", error: "TIMEOUT" });
+    });
+    req.on("error", (error: Error) => {
+      resolve({ status: 0, bytes: 0, type: "-", error: error.message });
+    });
+  });
+}
 
 export default async function handler(
   request: IncomingMessage,
@@ -27,42 +70,13 @@ export default async function handler(
     headers: { "User-Agent": UA },
     signal: AbortSignal.timeout(20000),
   });
-  lines.push(`hop1 http=${hop1.status}`);
   const location = hop1.headers.get("location") ?? "";
-  lines.push(`loc len=${location.length} ipbypass=${location.includes("ipbypass=yes")} mip=${location.includes("mip=")}`);
-  lines.push(`loc=${location.slice(0, 700)}`);
+  lines.push(`hop1=${hop1.status} loc=${location.length} chars`);
 
-  if (!location) {
-    response.end(lines.join("\n"));
-    return;
-  }
-
-  const hop2variants: Array<{ label: string; init: RequestInit }> = [
-    { label: "hop2 manual+UA", init: { redirect: "manual", headers: { "User-Agent": UA }, signal: AbortSignal.timeout(25000) } },
-    { label: "hop2 auto+UA", init: { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(25000) } },
-    { label: "hop2 auto+range", init: { headers: { "User-Agent": UA, Range: "bytes=0-65535" }, signal: AbortSignal.timeout(25000) } },
-  ];
-
-  for (const variant of hop2variants) {
-    try {
-      const res = await fetch(location, variant.init);
-      let note = "";
-      if (res.status === 200 || res.status === 206) {
-        const buf = new Uint8Array(await res.arrayBuffer());
-        note = ` bytes=${buf.length}`;
-      } else if (res.status >= 300 && res.status < 400) {
-        note = ` loc2=${(res.headers.get("location") ?? "").slice(0, 200)}`;
-      } else {
-        const text = await res.text();
-        note = ` body=${text.slice(0, 250).replace(/\s+/g, " ")}`;
-      }
-      lines.push(`${variant.label} http=${res.status} type=${res.headers.get("content-type")}${note}`);
-    } catch (error) {
-      const cause = (error as { cause?: { code?: string } }).cause;
-      lines.push(
-        `${variant.label} ERR ${error instanceof Error ? error.message : String(error)} cause=${cause?.code ?? "-"}`,
-      );
-    }
+  if (location) {
+    lines.push(`v4 :: ${JSON.stringify(await httpsGet(location, 4, 262144))}`);
+    lines.push(`auto :: ${JSON.stringify(await httpsGet(location, undefined, 262144))}`);
+    lines.push(`v6 :: ${JSON.stringify(await httpsGet(location, 6, 262144))}`);
   }
 
   response.statusCode = 200;
