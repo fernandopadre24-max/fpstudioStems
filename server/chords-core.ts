@@ -570,7 +570,13 @@ export async function handleChordsApi(
       return;
     }
 
-    const docs = await searchSongs(query);
+    let docs = await searchSongs(query);
+    if (docs.length === 0 && title && query.toLowerCase() !== title.toLowerCase()) {
+      docs = await searchSongs(title);
+    }
+    if (docs.length === 0 && artist && query.toLowerCase() !== artist.toLowerCase()) {
+      docs = await searchSongs(artist);
+    }
     if (docs.length === 0) {
       cache.set(cacheKey, null);
       sendJson(response, 404, { error: "Nenhuma cifra encontrada no Cifra Club." });

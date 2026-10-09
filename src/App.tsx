@@ -16,7 +16,7 @@ import {
   type DecodedAudio,
 } from "./lib/audio";
 import { analyzeChords, analyzeTrack, type ChordSegment, type TrackAnalysis } from "./lib/analysis";
-import { cifraToText, fetchCifra, type CifraResult } from "./lib/chords";
+import { cifraToText, fetchCifra, type CifraQuery, type CifraResult } from "./lib/chords";
 import {
   DEFAULT_WHISPER_ID,
   getModel,
@@ -545,14 +545,29 @@ export default function App() {
     setCifraError(null);
     setCifra(null);
     setCifraStatus("loading");
-    try {
-      const result = await fetchCifra({
+    const attempts: CifraQuery[] = [];
+    if (identity.title) {
+      attempts.push({
         title: identity.title,
         artist: identity.artist,
         q: [identity.artist, identity.title].filter(Boolean).join(" ") || identity.title,
       });
-      setCifra(result);
-      setLyricsTab("cifra");
+      attempts.push({ title: identity.title });
+    }
+    if (!attempts.length) attempts.push({});
+    try {
+      let lastError: unknown = null;
+      for (const attempt of attempts) {
+        try {
+          const result = await fetchCifra(attempt);
+          setCifra(result);
+          setLyricsTab("cifra");
+          return;
+        } catch (cause) {
+          lastError = cause;
+        }
+      }
+      throw lastError ?? new Error("Nenhuma cifra encontrada no Cifra Club.");
     } catch (cause) {
       setCifraError(cause instanceof Error ? cause.message : String(cause));
     } finally {

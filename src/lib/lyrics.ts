@@ -56,8 +56,26 @@ export function identifyTrack(
     const separator = result[1];
     const left = title.slice(0, result.index).trim();
     const right = title.slice(result.index + result[0].length).trim();
-    if (!artist || separator === "·" || separator === "•") artist = cleanArtist(left);
-    title = stripBrackets(right);
+    const artistNorm = cleanArtist(artist).toLowerCase();
+    const overlapsArtist = (value: string): boolean => {
+      const norm = cleanArtist(value).toLowerCase();
+      return Boolean(artistNorm && norm && (norm.startsWith(artistNorm) || artistNorm.startsWith(norm)));
+    };
+    const hyphenLike = /^[-–—]$/.test(separator);
+    if (separator === "·" || separator === "•") {
+      artist = cleanArtist(left);
+      title = stripBrackets(right);
+    } else if (hyphenLike && artist && overlapsArtist(right) && !overlapsArtist(left)) {
+      // "Musica - Artista": o canal aparece depois do hifen
+      artist = cleanArtist(right);
+      title = stripBrackets(left);
+    } else if (!artist || (hyphenLike && !NOISE_TAGS.test(left) && left.length <= 60)) {
+      // "Artista - Musica": prefere o artista derivado do titulo ao canal
+      artist = cleanArtist(left);
+      title = stripBrackets(right);
+    } else {
+      title = stripBrackets(right);
+    }
   }
 
   if (!title) title = baseName;
