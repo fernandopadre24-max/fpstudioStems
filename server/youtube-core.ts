@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream, promises as fs } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
@@ -161,8 +162,173 @@ export async function searchYouTube(query: string, limit = 20): Promise<YouTubeR
     }));
 }
 
-export function streamYouTubeAudio(id: string, response: ServerResponse): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+// ---------------------------------------------------------------------------
+// Fallback de audio via instancia Invidious: o YouTube bloqueia o IP de
+// datacenter da Vercel em todos os players (bot-check) e o googlevideo
+// recusa o IP da Vercel, entao o audio e servido pelo proxy da instancia
+// (que passa pelo desafio Anubis/PoW antes de liberar o bytes).
+
+const INVIDIOUS_BASE = "https://invidious.f5.si";
+const CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+// Cookie de auth do Anubis (JWT valido por ~7 dias); revalidado ao detectar
+// um novo desafio, pois o JWT pode ficar preso ao IP de saida da funcao.
+let anubisCookie: string | null = null;
+
+function anubisPow(
+  randomData: string,
+  difficulty: number,
+): { nonce: string; hash: string; ms: number } | null {
+  const target = "0".repeat(Math.max(1, Math.min(difficulty, 8)));
+  const start = Date.now();
+  for (let nonce = 0; nonce < 10_000_000; nonce += 1) {
+    const hash = createHash("sha256").update(randomData + String(nonce)).digest("hex");
+    if (hash.startsWith(target)) {
+      return { nonce: String(nonce), hash, ms: Date.now() - start };
+    }
+  }
+  return null;
+}
+
+function setCookiePairs(response: Response): string[] {
+  const header = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.();
+  return (header ?? []).map((pair) => pair.split(";")[0]);
+}
+
+async function solveAnubis(pageUrl: string): Promise<string | null> {
+  const challengeResponse = await fetch(pageUrl, {
+    headers: { "User-Agent": CHROME_UA },
+    redirect: "manual",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (challengeResponse.status !== 200) return null;
+  const body = await challengeResponse.text();
+  const challengePageCookies = setCookiePairs(challengeResponse);
+  const match = body.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
+  if (!match) return null;
+
+  const parsed = JSON.parse(match[0]) as {
+    rules: { difficulty: number };
+    challenge: { id: string; randomData: string };
+  };
+  const solution = anubisPow(parsed.challenge.randomData, parsed.rules.difficulty);
+  if (!solution) return null;
+
+  const target = new URL(pageUrl);
+  const passUrl =
+    `${INVIDIOUS_BASE}/.within.website/x/cmd/anubis/api/pass-challenge` +
+    `?id=${encodeURIComponent(parsed.challenge.id)}` +
+    `&response=${solution.hash}` +
+    `&nonce=${solution.nonce}` +
+    `&redir=${encodeURIComponent(target.pathname + target.search)}` +
+    `&elapsedTime=${solution.ms}`;
+  const passResponse = await fetch(passUrl, {
+    headers: {
+      "User-Agent": CHROME_UA,
+      Cookie: challengePageCookies.join("; "),
+      Referer: pageUrl,
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (passResponse.status !== 302) return null;
+  const auth = setCookiePairs(passResponse)
+    .filter((pair) => !/Max-Age=0/i.test(pair))
+    .join("; ");
+  return auth || null;
+}
+
+async function openInvidiousAudio(id: string): Promise<Response> {
+  const apiUrl = `${INVIDIOUS_BASE}/api/v1/videos/${encodeURIComponent(id)}?local=true`;
+  const apiResponse = await fetch(apiUrl, {
+    headers: { "User-Agent": CHROME_UA, Accept: "application/json" },
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!apiResponse.ok) throw new Error(`Invidious respondeu HTTP ${apiResponse.status}.`);
+  const data = (await apiResponse.json()) as {
+    adaptiveFormats?: Array<{ type?: string; url?: string }>;
+  };
+  const audioFormats = (data.adaptiveFormats ?? []).filter((format) =>
+    (format.type ?? "").startsWith("audio/"),
+  );
+  const audio =
+    audioFormats.find((format) => (format.type ?? "").startsWith("audio/mp4")) ?? audioFormats[0];
+  if (!audio?.url) throw new Error("Invidious nao retornou URL de audio.");
+
+  let audioUrl = audio.url;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const headers: Record<string, string> = { "User-Agent": CHROME_UA };
+    if (anubisCookie) headers.Cookie = anubisCookie;
+    const audioResponse = await fetch(audioUrl, {
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (audioResponse.status === 200 || audioResponse.status === 206) {
+      const contentType = audioResponse.headers.get("content-type") ?? "";
+      if (contentType.includes("text/html")) {
+        await audioResponse.text();
+        anubisCookie = await solveAnubis(audioUrl);
+        if (!anubisCookie) throw new Error("Invidious exigiu verificacao anti-bot.");
+        continue;
+      }
+      return audioResponse;
+    }
+
+    if (audioResponse.status >= 300 && audioResponse.status < 400) {
+      const location = audioResponse.headers.get("location");
+      if (location?.startsWith(INVIDIOUS_BASE)) {
+        audioUrl = location;
+        continue;
+      }
+      throw new Error(`Invidious redirecionou (HTTP ${audioResponse.status}).`);
+    }
+
+    if (attempt === 0 && (audioResponse.status === 401 || audioResponse.status === 403)) {
+      // cookie possivelmente preso a outro IP de saida: refaz o fluxo completo
+      anubisCookie = null;
+      continue;
+    }
+    throw new Error(`Invidious audio HTTP ${audioResponse.status}.`);
+  }
+  throw new Error("Invidious nao retornou audio.");
+}
+
+async function streamInvidiousAudio(id: string, response: ServerResponse): Promise<void> {
+  try {
+    const audioResponse = await openInvidiousAudio(id);
+    response.statusCode = audioResponse.status;
+    response.setHeader(
+      "Content-Type",
+      audioResponse.headers.get("content-type")?.split(";")[0] ?? "audio/mp4",
+    );
+    response.setHeader("Cache-Control", "no-store");
+    if (!audioResponse.body) throw new Error("Resposta de audio sem corpo.");
+    const body = audioResponse.body as unknown as Parameters<typeof Readable.fromWeb>[0];
+    await pipeline(Readable.fromWeb(body), response);
+  } catch (cause) {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    if (!response.headersSent) {
+      sendJson(response, 502, { error });
+    } else {
+      response.end();
+    }
+  }
+}
+
+export async function streamYouTubeAudio(
+  id: string,
+  response: ServerResponse,
+): Promise<void> {
+  const streamed = await streamYtDlpAudio(id, response);
+  if (streamed) return;
+  await streamInvidiousAudio(id, response);
+}
+
+function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     ensureYtDlp().then(
       (executable) => {
         const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
@@ -182,7 +348,6 @@ export function streamYouTubeAudio(id: string, response: ServerResponse): Promis
         );
 
         let started = false;
-        let stderr = "";
 
         child.stdout.on("data", (chunk: Buffer) => {
           if (!started) {
@@ -194,37 +359,31 @@ export function streamYouTubeAudio(id: string, response: ServerResponse): Promis
           response.write(chunk);
         });
 
-        child.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString();
+        child.stderr.on("data", () => undefined);
+
+        child.on("error", () => {
+          if (started) {
+            response.end();
+            resolve(true);
+          } else {
+            resolve(false);
+          }
         });
 
-        child.on("error", (error) => {
-          if (!response.headersSent) {
-            response.statusCode = 502;
-            response.setHeader("Content-Type", "application/json; charset=utf-8");
-            response.end(JSON.stringify({ error: error.message }));
-          } else {
+        child.on("close", () => {
+          if (started) {
             response.end();
-          }
-          reject(error);
-        });
-
-        child.on("close", (code) => {
-          if (!started) {
-            response.statusCode = 502;
-            response.setHeader("Content-Type", "application/json; charset=utf-8");
-            response.end(JSON.stringify({ error: stderr.trim() || `yt-dlp saiu com codigo ${code}` }));
+            resolve(true);
           } else {
-            response.end();
+            resolve(false);
           }
-          resolve();
         });
 
         response.on("close", () => {
           child.kill();
         });
       },
-      (error) => reject(error),
+      () => resolve(false),
     );
   });
 }
