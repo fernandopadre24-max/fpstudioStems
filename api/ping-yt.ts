@@ -1,48 +1,24 @@
+import { promises as dns } from "node:dns";
+import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-const VIDEO = "tI9kSZgMLsc";
-const TIMEOUT = AbortSignal.timeout(10000);
+const HOSTS = ["api.cobalt.tools", "pipedapi.adminforge.de", "inv.nadeko.net", "solr.sscdn.co"];
 
-async function probeJson(label: string, url: string): Promise<string[]> {
-  const lines: string[] = [];
-  try {
-    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: TIMEOUT });
-    const text = await res.text();
-    lines.push(`${label} http=${res.status} len=${text.length}`);
-    if (res.status !== 200) {
-      lines.push(`${label} body=${text.slice(0, 150).replace(/\s+/g, " ")}`);
-      return lines;
-    }
-    try {
-      const data = JSON.parse(text) as Record<string, unknown>;
-      const audio =
-        (data.audioStreams as Array<{ url?: string }> | undefined) ??
-        ((data.adaptiveFormats as Array<{ mimeType?: string; url?: string }> | undefined) ?? []).filter(
-          (f) => (f.mimeType ?? "").startsWith("audio/"),
-        );
-      if (!audio || audio.length === 0) {
-        lines.push(`${label} sem audioStreams; chaves=${Object.keys(data).slice(0, 12).join(",")}`);
-        if (typeof data.error === "string") lines.push(`${label} error=${data.error.slice(0, 120)}`);
-        if (typeof data.message === "string") lines.push(`${label} message=${data.message.slice(0, 120)}`);
-        return lines;
-      }
-      const first = audio[audio.length - 1];
-      const streamUrl = first.url ?? "";
-      lines.push(`${label} audio host=${streamUrl ? new URL(streamUrl).host : "?"} qtd=${audio.length}`);
-      if (streamUrl) {
-        const dl = await fetch(streamUrl, { headers: { Range: "bytes=0-65535" }, signal: TIMEOUT });
-        const buf = new Uint8Array(await dl.arrayBuffer());
-        lines.push(
-          `${label} stream http=${dl.status} bytes=${buf.length} type=${dl.headers.get("content-type")}`,
-        );
-      }
-    } catch (error) {
-      lines.push(`${label} parse ERR ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } catch (error) {
-    lines.push(`${label} ERR ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return lines;
+function probeHttps(host: string): Promise<string> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      { host, path: "/", timeout: 12000, family: 4, headers: { "User-Agent": "Mozilla/5.0" } },
+      (res: IncomingMessage) => {
+        res.resume();
+        resolve(`https v4 http=${res.statusCode}`);
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve("https v4 TIMEOUT");
+    });
+    req.on("error", (error: Error) => resolve(`https v4 ERR ${error.message}`));
+  });
 }
 
 export default async function handler(
@@ -53,39 +29,31 @@ export default async function handler(
   response.setHeader("Content-Type", "text/plain; charset=utf-8");
   const lines: string[] = [];
 
-  const piped = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.private.coffee",
-    "https://pipedapi.reallyaweso.me",
-    "https://pipedapi.ducks.party",
-  ];
-  for (const base of piped) {
-    lines.push(...(await probeJson(`piped ${new URL(base).host}`, `${base}/streams/${VIDEO}`)));
-  }
+  for (const host of HOSTS) {
+    try {
+      const addresses = await dns.lookup(host, { all: true });
+      lines.push(`dns ${host} = ${addresses.map((a) => `${a.family}:${a.address}`).join(" ")}`);
+    } catch (error) {
+      lines.push(`dns ${host} ERR ${error instanceof Error ? error.message : String(error)}`);
+    }
 
-  const invidious = [
-    "https://inv.nadeko.net",
-    "https://yewtu.be",
-    "https://invidious.nerdvpn.de",
-    "https://iv.melmac.space",
-    "https://invidious.jing.rocks",
-  ];
-  for (const base of invidious) {
-    lines.push(...(await probeJson(`inv ${new URL(base).host}`, `${base}/api/v1/videos/${VIDEO}`)));
-  }
+    const start = Date.now();
+    try {
+      const res = await fetch(`https://${host}/`, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(12000),
+        redirect: "manual",
+      });
+      res.body?.cancel().catch(() => undefined);
+      lines.push(`fetch ${host} http=${res.status} ${Date.now() - start}ms`);
+    } catch (error) {
+      const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+      lines.push(
+        `fetch ${host} ERR ${error instanceof Error ? error.message : String(error)} :: cause=${cause?.code ?? cause?.message ?? "-"} ${Date.now() - start}ms`,
+      );
+    }
 
-  try {
-    const res = await fetch("https://api.cobalt.tools/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${VIDEO}`, downloadMode: "audio" }),
-      signal: TIMEOUT,
-    });
-    const text = await res.text();
-    lines.push(`cobalt http=${res.status} :: ${text.slice(0, 300).replace(/\s+/g, " ")}`);
-  } catch (error) {
-    lines.push(`cobalt ERR ${error instanceof Error ? error.message : String(error)}`);
+    lines.push(`probe ${host} :: ${await probeHttps(host)}`);
   }
 
   response.statusCode = 200;
