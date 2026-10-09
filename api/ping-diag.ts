@@ -5,34 +5,24 @@ export async function GET(): Promise<Response> {
 
   try {
     lines.push("cwd=" + process.cwd());
+    lines.push(`root = ${readdirSync(".").join(", ")}`);
+    lines.push(`server = ${readdirSync("./server").join(", ")}`);
   } catch (error) {
-    lines.push("cwd err " + String(error));
-  }
-
-  for (const dir of [".", "./server", "./api"]) {
-    try {
-      lines.push(`${dir} = ${readdirSync(dir).join(", ")}`);
-    } catch (error) {
-      lines.push(`${dir} ERR ${error instanceof Error ? error.message : String(error)}`);
-    }
+    lines.push("fs ERR " + (error instanceof Error ? error.message : String(error)));
   }
 
   try {
-    const mod = await import("../server/http");
-    lines.push(`import sem extensao -> ok (${typeof mod.sendJson})`);
+    const mod = await import("../server/http.js");
+    lines.push(`import .js -> ok (${typeof mod.sendJson})`);
   } catch (error) {
-    lines.push(
-      `import sem extensao -> ERR ${error instanceof Error ? `${error.message} :: ${error.stack?.split("\n")[1] ?? ""}` : String(error)}`,
-    );
+    lines.push(`import .js -> ERR ${error instanceof Error ? error.message : String(error)}`);
   }
 
   try {
-    const mod = await import("../server/http.ts");
-    lines.push(`import com .ts -> ok (${typeof mod.sendJson})`);
+    const mod = await import("../server/youtube-core.js");
+    lines.push(`import youtube-core.js -> ok (${typeof mod.handleYouTubeApi})`);
   } catch (error) {
-    lines.push(
-      `import com .ts -> ERR ${error instanceof Error ? `${error.message} :: ${error.stack?.split("\n")[1] ?? ""}` : String(error)}`,
-    );
+    lines.push(`import youtube-core.js -> ERR ${error instanceof Error ? error.message : String(error)}`);
   }
 
   return new Response(lines.join("\n"), {

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import { handleYouTubeApi } from "./youtube-core";
+import { handleYouTubeApi } from "./youtube-core.js";
 
 export function youtubeApiPlugin(): Plugin {
   const middleware = async (

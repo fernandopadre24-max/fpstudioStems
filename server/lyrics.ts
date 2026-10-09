@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import { handleLyricsApi } from "./lyrics-core";
+import { handleLyricsApi } from "./lyrics-core.js";
 
 export function lyricsApiPlugin(): Plugin {
   const middleware = async (
