@@ -1,49 +1,23 @@
-import * as https from "node:https";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-const VIDEO = "tI9kSZgMLsc";
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const BASE = "https://invidious.f5.si";
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-function httpsGet(
-  url: string,
-  family: 4 | 6 | undefined,
-  maxBytes: number,
-): Promise<{ status: number; bytes: number; type: string; error?: string }> {
-  return new Promise((resolve) => {
-    const req = https.get(
-      url,
-      { family, timeout: 25000, headers: { "User-Agent": UA, Range: "bytes=0-262143" } },
-      (res: IncomingMessage) => {
-        let bytes = 0;
-        let done = false;
-        const finish = (): void => {
-          if (done) return;
-          done = true;
-          resolve({
-            status: res.statusCode ?? 0,
-            bytes,
-            type: String(res.headers["content-type"] ?? "-"),
-          });
-        };
-        res.on("data", (chunk: Buffer) => {
-          bytes += chunk.length;
-          if (bytes >= maxBytes) {
-            req.destroy();
-            finish();
-          }
-        });
-        res.on("close", finish);
-        res.on("end", finish);
-      },
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      resolve({ status: 0, bytes: 0, type: "-", error: "TIMEOUT" });
-    });
-    req.on("error", (error: Error) => {
-      resolve({ status: 0, bytes: 0, type: "-", error: error.message });
-    });
-  });
+function pow(randomData: string, difficulty: number): { nonce: string; hash: string; ms: number } | null {
+  const target = "0".repeat(Math.max(1, Math.min(difficulty, 8)));
+  const start = Date.now();
+  for (let nonce = 0; nonce < 10_000_000; nonce += 1) {
+    const hash = createHash("sha256").update(randomData + String(nonce)).digest("hex");
+    if (hash.startsWith(target)) return { nonce: String(nonce), hash, ms: Date.now() - start };
+  }
+  return null;
+}
+
+function cookies(response: Response): string[] {
+  const header = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.();
+  return (header ?? []).map((pair) => pair.split(";")[0]);
 }
 
 export default async function handler(
@@ -54,30 +28,65 @@ export default async function handler(
   response.setHeader("Content-Type", "text/plain; charset=utf-8");
   const lines: string[] = [];
 
-  const api = await fetch(`https://invidious.f5.si/api/v1/videos/${VIDEO}`, {
+  const apiUrl = `${BASE}/api/v1/videos/tI9kSZgMLsc?local=true`;
+  const apiRes = await fetch(apiUrl, {
     headers: { "User-Agent": UA, Accept: "application/json" },
+    signal: AbortSignal.timeout(25000),
+  });
+  const apiBody = await apiRes.text();
+  lines.push(`api http=${apiRes.status} type=${apiRes.headers.get("content-type")} len=${apiBody.length}`);
+  lines.push(`api body: ${apiBody.slice(0, 220).replace(/\s+/g, " ")}`);
+
+  const challengeMatch = apiBody.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
+  if (!challengeMatch) {
+    response.end(lines.join("\n"));
+    return;
+  }
+  lines.push("anubis no endpoint da api");
+
+  const parsed = JSON.parse(challengeMatch[0]) as {
+    rules: { difficulty: number };
+    challenge: { id: string; randomData: string };
+  };
+  const solution = pow(parsed.challenge.randomData, parsed.rules.difficulty);
+  if (!solution) {
+    lines.push("pow falhou");
+    response.end(lines.join("\n"));
+    return;
+  }
+  lines.push(`pow nonce=${solution.nonce} ms=${solution.ms}`);
+
+  const apiCookies = cookies(apiRes);
+  const passUrl =
+    `${BASE}/.within.website/x/cmd/anubis/api/pass-challenge` +
+    `?id=${encodeURIComponent(parsed.challenge.id)}` +
+    `&response=${solution.hash}` +
+    `&nonce=${solution.nonce}` +
+    `&redir=${encodeURIComponent("/api/v1/videos/tI9kSZgMLsc?local=true")}` +
+    `&elapsedTime=${solution.ms}`;
+  const passRes = await fetch(passUrl, {
+    headers: { "User-Agent": UA, Cookie: apiCookies.join("; "), Referer: apiUrl },
+    redirect: "manual",
     signal: AbortSignal.timeout(20000),
   });
-  const data = (await api.json()) as { adaptiveFormats?: Array<{ type?: string; url?: string }> };
-  const audio = (data.adaptiveFormats ?? []).find((f) => (f.type ?? "").startsWith("audio/"));
-  if (!audio?.url) {
-    response.end("sem audio");
+  lines.push(`pass http=${passRes.status}`);
+  const auth = cookies(passRes)
+    .filter((pair) => !/Max-Age=0/i.test(pair))
+    .join("; ");
+  lines.push(`auth=${auth ? `sim (${auth.length} chars)` : "nao"}`);
+
+  if (!auth) {
+    response.end(lines.join("\n"));
     return;
   }
 
-  const hop1 = await fetch(audio.url, {
-    redirect: "manual",
-    headers: { "User-Agent": UA },
-    signal: AbortSignal.timeout(20000),
+  const retry = await fetch(apiUrl, {
+    headers: { "User-Agent": UA, Accept: "application/json", Cookie: auth },
+    signal: AbortSignal.timeout(25000),
   });
-  const location = hop1.headers.get("location") ?? "";
-  lines.push(`hop1=${hop1.status} loc=${location.length} chars`);
-
-  if (location) {
-    lines.push(`v4 :: ${JSON.stringify(await httpsGet(location, 4, 262144))}`);
-    lines.push(`auto :: ${JSON.stringify(await httpsGet(location, undefined, 262144))}`);
-    lines.push(`v6 :: ${JSON.stringify(await httpsGet(location, 6, 262144))}`);
-  }
+  const retryBody = await retry.text();
+  lines.push(`api2 http=${retry.status} type=${retry.headers.get("content-type")} len=${retryBody.length}`);
+  lines.push(`api2 body: ${retryBody.slice(0, 220).replace(/\s+/g, " ")}`);
 
   response.statusCode = 200;
   response.end(lines.join("\n"));
