@@ -187,8 +187,7 @@ async function searchInvidious(query: string, limit: number): Promise<YouTubeRes
         channel: item.author ?? "",
         duration: typeof item.lengthSeconds === "number" ? item.lengthSeconds : null,
         viewCount: typeof item.viewCount === "number" ? item.viewCount : null,
-        thumbnail:
-          item.videoThumbnails?.[0]?.url ?? `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`,
+        thumbnail: `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
       }));
   } catch {
     return [];
@@ -257,7 +256,10 @@ async function solveAnubis(pageUrl: string): Promise<AnubisSolve> {
     const body = await challengeResponse.text();
     const challengePageCookies = setCookiePairs(challengeResponse);
     const match = body.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
-    if (!match) return { cookie: null, error: "desafio Anubis nao encontrado no HTML" };
+    if (!match) {
+      const snippet = body.replace(/\s+/g, " ").trim().slice(0, 220);
+      return { cookie: null, error: `sem challenge JSON (len=${body.length}): ${snippet}` };
+    }
 
     const parsed = JSON.parse(match[0]) as {
       rules: { difficulty: number };
@@ -528,6 +530,44 @@ export async function handleYouTubeApi(
         return;
       }
       await streamYouTubeAudio(id, response);
+      return;
+    }
+
+    if (route === "debug") {
+      const id = (requestUrl.searchParams.get("id") ?? "fJ9rUzIMcZQ").trim();
+      const report: Record<string, unknown> = {};
+      for (const local of ["true", "false"]) {
+        try {
+          const r = await fetch(
+            `${INVIDIOUS_BASE}/api/v1/videos/${encodeURIComponent(id)}?local=${local}`,
+            {
+              headers: { "User-Agent": CHROME_UA, Accept: "application/json" },
+              signal: AbortSignal.timeout(20_000),
+            },
+          );
+          const text = await r.text();
+          report[`invidious_local_${local}`] = {
+            status: r.status,
+            contentType: r.headers.get("content-type"),
+            head: text.replace(/\s+/g, " ").slice(0, 200),
+          };
+        } catch (cause) {
+          report[`invidious_local_${local}`] = String(cause);
+        }
+      }
+      try {
+        const exe = await ensureYtDlp();
+        const out = await collectOutput(exe, [
+          "--simulate",
+          "--dump-json",
+          "--no-warnings",
+          `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
+        ]);
+        report.ytdlp = { ok: true, head: out.replace(/\s+/g, " ").slice(0, 200) };
+      } catch (cause) {
+        report.ytdlp = { ok: false, error: String(cause).slice(0, 400) };
+      }
+      sendJson(response, 200, report);
       return;
     }
 
