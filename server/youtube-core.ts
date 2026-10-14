@@ -235,47 +235,64 @@ function setCookiePairs(response: Response): string[] {
   return (header ?? []).map((pair) => pair.split(";")[0]);
 }
 
-async function solveAnubis(pageUrl: string): Promise<string | null> {
-  const challengeResponse = await fetch(pageUrl, {
-    headers: { "User-Agent": CHROME_UA },
-    redirect: "manual",
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (challengeResponse.status !== 200) return null;
-  const body = await challengeResponse.text();
-  const challengePageCookies = setCookiePairs(challengeResponse);
-  const match = body.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
-  if (!match) return null;
+interface AnubisSolve {
+  cookie: string | null;
+  error: string;
+}
 
-  const parsed = JSON.parse(match[0]) as {
-    rules: { difficulty: number };
-    challenge: { id: string; randomData: string };
-  };
-  const solution = anubisPow(parsed.challenge.randomData, parsed.rules.difficulty);
-  if (!solution) return null;
+async function solveAnubis(pageUrl: string): Promise<AnubisSolve> {
+  try {
+    const challengeResponse = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": CHROME_UA,
+        Accept: "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (challengeResponse.status !== 200) {
+      return { cookie: null, error: `challenge HTTP ${challengeResponse.status}` };
+    }
+    const body = await challengeResponse.text();
+    const challengePageCookies = setCookiePairs(challengeResponse);
+    const match = body.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
+    if (!match) return { cookie: null, error: "desafio Anubis nao encontrado no HTML" };
 
-  const target = new URL(pageUrl);
-  const passUrl =
-    `${INVIDIOUS_BASE}/.within.website/x/cmd/anubis/api/pass-challenge` +
-    `?id=${encodeURIComponent(parsed.challenge.id)}` +
-    `&response=${solution.hash}` +
-    `&nonce=${solution.nonce}` +
-    `&redir=${encodeURIComponent(target.pathname + target.search)}` +
-    `&elapsedTime=${solution.ms}`;
-  const passResponse = await fetch(passUrl, {
-    headers: {
-      "User-Agent": CHROME_UA,
-      Cookie: challengePageCookies.join("; "),
-      Referer: pageUrl,
-    },
-    redirect: "manual",
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (passResponse.status !== 302) return null;
-  const auth = setCookiePairs(passResponse)
-    .filter((pair) => !/Max-Age=0/i.test(pair))
-    .join("; ");
-  return auth || null;
+    const parsed = JSON.parse(match[0]) as {
+      rules: { difficulty: number };
+      challenge: { id: string; randomData: string };
+    };
+    const solution = anubisPow(parsed.challenge.randomData, parsed.rules.difficulty);
+    if (!solution) return { cookie: null, error: "PoW sem solucao" };
+
+    const target = new URL(pageUrl);
+    const passUrl =
+      `${INVIDIOUS_BASE}/.within.website/x/cmd/anubis/api/pass-challenge` +
+      `?id=${encodeURIComponent(parsed.challenge.id)}` +
+      `&response=${solution.hash}` +
+      `&nonce=${solution.nonce}` +
+      `&redir=${encodeURIComponent(target.pathname + target.search)}` +
+      `&elapsedTime=${solution.ms}`;
+    const passResponse = await fetch(passUrl, {
+      headers: {
+        "User-Agent": CHROME_UA,
+        Cookie: challengePageCookies.join("; "),
+        Referer: pageUrl,
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (passResponse.status !== 302) {
+      return { cookie: null, error: `pass-challenge HTTP ${passResponse.status}` };
+    }
+    const auth = setCookiePairs(passResponse)
+      .filter((pair) => !/Max-Age=0/i.test(pair))
+      .join("; ");
+    return auth ? { cookie: auth, error: "" } : { cookie: null, error: "sem cookie de auth" };
+  } catch (cause) {
+    return { cookie: null, error: cause instanceof Error ? cause.message : String(cause) };
+  }
 }
 
 // GET JSON de uma rota da instancia Invidious, resolvendo o desafio Anubis
@@ -297,7 +314,8 @@ async function invidiousJson<T>(pathAndQuery: string): Promise<T | null> {
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType.includes("text/html")) {
         await response.text();
-        anubisCookie = await solveAnubis(url);
+        const solved = await solveAnubis(url);
+        anubisCookie = solved.cookie;
         if (anubisCookie) continue;
         return null;
       }
@@ -342,8 +360,9 @@ async function openInvidiousAudio(id: string): Promise<Response> {
       const contentType = audioResponse.headers.get("content-type") ?? "";
       if (contentType.includes("text/html")) {
         await audioResponse.text();
-        anubisCookie = await solveAnubis(audioUrl);
-        if (!anubisCookie) throw new Error("Invidious exigiu verificacao anti-bot.");
+        const solved = await solveAnubis(audioUrl);
+        anubisCookie = solved.cookie;
+        if (!anubisCookie) throw new Error(`Invidious anti-bot: ${solved.error}`);
         continue;
       }
       return audioResponse;
