@@ -7,7 +7,7 @@
 #   .\configurar-cookies.ps1 -CookiesPath "C:\caminho\cookies.txt"
 
 param(
-  [string]$CookiesPath = (Join-Path $HOME "Downloads\cookies.txt")
+  [string]$CookiesPath = ""
 )
 
 function Info($m) { Write-Host $m -ForegroundColor Cyan }
@@ -15,15 +15,47 @@ function Ok($m)   { Write-Host $m -ForegroundColor Green }
 function Warn($m) { Write-Host $m -ForegroundColor Yellow }
 function Err($m)  { Write-Host $m -ForegroundColor Red }
 
+function Find-CookiesFile {
+  param([string]$Explicit)
+  if ($Explicit) {
+    if (Test-Path -LiteralPath $Explicit) { return (Get-Item -LiteralPath $Explicit).FullName }
+    Err "Nao encontrei o arquivo indicado: $Explicit"
+    return $null
+  }
+  $dirs = @("$HOME\Downloads", "$HOME\OneDrive\Downloads", "$HOME\Desktop", "$HOME\OneDrive\Desktop", (Get-Location).Path)
+  $candidates = @()
+  foreach ($d in $dirs) {
+    if (Test-Path -LiteralPath $d) {
+      $candidates += Get-ChildItem -LiteralPath $d -Filter "*.txt" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '(?i)cookie' }
+    }
+  }
+  if ($candidates.Count -gt 0) {
+    $pick = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    Ok "Arquivo de cookies encontrado automaticamente: $($pick.FullName)"
+    return $pick.FullName
+  }
+  return $null
+}
+
 # 1) Localiza e valida o arquivo de cookies
-if (-not (Test-Path -LiteralPath $CookiesPath)) {
-  Err "Nao encontrei o arquivo: $CookiesPath"
-  Info "Exporte os cookies do YouTube com a extensao 'Get cookies.txt LOCALLY'"
-  Info "(instale no Chrome logado no YouTube, clique em Export) e salve como:"
-  Info "  $CookiesPath"
-  Info "Ou passe o caminho:  .\configurar-cookies.ps1 -CookiesPath 'C:\caminho\cookies.txt'"
+$found = Find-CookiesFile -Explicit $CookiesPath
+if (-not $found) {
+  Err "Nao encontrei nenhum cookies.txt."
+  Write-Host ""
+  Info "Como exportar os cookies do YouTube:"
+  Info "  1) No Chrome logado no YouTube, instale a extensao 'Get cookies.txt LOCALLY'"
+  Info "     (loja do Chrome, pesquise por 'Get cookies.txt LOCALLY')."
+  Info "  2) Abra https://www.youtube.com"
+  Info "  3) Clique no icone da extensao e em 'Export'."
+  Info "  4) Salve o arquivo (cookies.txt) na pasta Downloads."
+  Info "  5) Rode este script de novo."
+  Write-Host ""
+  Info "Ja tem o arquivo em outro lugar? Passe o caminho:"
+  Info "  .\configurar-cookies.ps1 -CookiesPath 'C:\caminho\cookies.txt'"
   exit 1
 }
+$CookiesPath = $found
 
 $content = Get-Content -LiteralPath $CookiesPath -Raw
 $tabLines = ($content -split "`n" | Where-Object { ([regex]::Matches($_, "\t")).Count -ge 6 }).Count
