@@ -78,11 +78,15 @@ function cookieFileContent(): string | null {
   return raw.replace(/\\n/g, "\n");
 }
 
+function looksLikeCookies(content: string): boolean {
+  return content.includes("\t") || content.includes("# Netscape HTTP Cookie File");
+}
+
 export async function ensureCookies(): Promise<string | null> {
   if (cookiesReady) return cookiesPath;
   cookiesReady = true;
   const content = cookieFileContent();
-  if (!content) return null;
+  if (!content || !looksLikeCookies(content)) return null;
   try {
     await fs.mkdir(binDir, { recursive: true });
     const file = path.join(binDir, "cookies.txt");
@@ -502,8 +506,15 @@ export async function streamYouTubeAudio(
   response: ServerResponse,
 ): Promise<void> {
   const errors: string[] = [];
+  const rawCookies = Boolean(process.env.YTDLP_COOKIES?.trim());
   const hasCookies = Boolean(await ensureCookies());
-  errors.push(`cookies:${hasCookies ? "sim" : "nao"}`);
+  errors.push(
+    hasCookies
+      ? "cookies:sim"
+      : rawCookies
+        ? "cookies:formato invalido (use o base64 do cookies.txt Netscape)"
+        : "cookies:nao",
+  );
   // Com cookies configurados o yt-dlp autentica e funciona mesmo em datacenter.
   if (hasCookies && (await streamYtDlpAudio(id, response, errors))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
