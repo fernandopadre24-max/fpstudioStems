@@ -609,8 +609,10 @@ export async function streamYouTubeAudio(
   const errors: string[] = [];
   const hasCookies = Boolean(await ensureCookies());
   errors.push(cookieStatus());
-  // Com cookies configurados o yt-dlp autentica e funciona mesmo em datacenter.
-  if (hasCookies && (await streamYtDlpAudio(id, response, errors))) return;
+  // Local (sem VERCEL): o IP nao e datacenter, entao o yt-dlp funciona direto.
+  // No Vercel, sem cookies o yt-dlp e bloqueado -> Invidious primeiro.
+  const preferYtDlp = hasCookies || !process.env.VERCEL;
+  if (preferYtDlp && (await streamYtDlpAudio(id, response, errors))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
   if (await streamYtDlpAudio(id, response, errors)) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
