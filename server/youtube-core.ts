@@ -502,15 +502,17 @@ export async function streamYouTubeAudio(
   response: ServerResponse,
 ): Promise<void> {
   const errors: string[] = [];
+  const hasCookies = Boolean(await ensureCookies());
+  errors.push(`cookies:${hasCookies ? "sim" : "nao"}`);
   // Com cookies configurados o yt-dlp autentica e funciona mesmo em datacenter.
-  if ((await ensureCookies()) && (await streamYtDlpAudio(id, response))) return;
+  if (hasCookies && (await streamYtDlpAudio(id, response, errors))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
-  if (await streamYtDlpAudio(id, response)) return;
+  if (await streamYtDlpAudio(id, response, errors)) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
   sendJson(response, 502, {
     error:
       "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio.",
-    ...(errors.length ? { detail: errors.slice(-3).join(" | ") } : {}),
+    ...(errors.length ? { detail: errors.slice(-5).join(" | ") } : {}),
   });
 }
 
@@ -537,11 +539,16 @@ async function probeYtDlpSize(
   }
 }
 
-async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
+async function streamYtDlpAudio(
+  id: string,
+  response: ServerResponse,
+  errors: string[] = [],
+): Promise<boolean> {
   let executable: string;
   try {
     executable = await ensureYtDlp();
-  } catch {
+  } catch (cause) {
+    errors.push(`yt-dlp indisponivel: ${cause instanceof Error ? cause.message : String(cause)}`);
     return false;
   }
   const cookies = await cookieArgs();
@@ -565,6 +572,7 @@ async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<b
     );
 
     let started = false;
+    let stderr = "";
     const contentType = "audio/webm";
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -578,13 +586,17 @@ async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<b
       response.write(chunk);
     });
 
-    child.stderr.on("data", () => undefined);
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > 6000) stderr = stderr.slice(-6000);
+    });
 
-    child.on("error", () => {
+    child.on("error", (cause) => {
       if (started) {
         response.end();
         resolve(true);
       } else {
+        errors.push(`yt-dlp erro: ${cause.message}`);
         resolve(false);
       }
     });
@@ -594,6 +606,13 @@ async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<b
         response.end();
         resolve(true);
       } else {
+        const tail = stderr
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .slice(-2)
+          .join(" ");
+        errors.push(`yt-dlp${cookies.length ? " (cookies)" : ""}: ${tail || "sem saida"}`);
         resolve(false);
       }
     });
