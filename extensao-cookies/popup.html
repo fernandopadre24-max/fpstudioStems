@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { width: 290px; font: 13px system-ui, sans-serif; padding: 14px; color: #111; }
+      h3 { margin: 0 0 8px; font-size: 14px; }
+      p { margin: 0 0 10px; color: #555; line-height: 1.4; }
+      button { width: 100%; padding: 9px; font-size: 13px; cursor: pointer; border: 0; border-radius: 6px; background: #2563eb; color: #fff; }
+      button:hover { background: #1d4ed8; }
+      #status { margin-top: 10px; color: #555; white-space: pre-wrap; }
+      .ok { color: #15803d; }
+      .err { color: #b91c1c; }
+    </style>
+  </head>
+  <body>
+    <h3>Exportar cookies do YouTube</h3>
+    <p>
+      1. Abra o <b>youtube.com</b> logado na sua conta.<br />
+      2. Clique no botão abaixo.<br />
+      3. Salve o arquivo <b>cookies.txt</b> na pasta Downloads.
+    </p>
+    <button id="go">Exportar cookies.txt</button>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>
