@@ -731,7 +731,10 @@ export default function App() {
             </svg>
           </span>
           <div>
-            <h1>FPStudio - Stems v.0.1 - 2027</h1>
+            <h1>
+              FPStudio - Stems v.0.1 - 2027
+              <span className="beta-badge" title="Versao em testes">Beta</span>
+            </h1>
             <p>FPStudio Gravaçoes, Fernando Sena Desenvolvimento.</p>
           </div>
         </div>
