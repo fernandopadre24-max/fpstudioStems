@@ -480,6 +480,8 @@ async function streamInvidiousAudio(
       audioResponse.headers.get("content-type")?.split(";")[0] ?? "audio/mp4",
     );
     response.setHeader("Cache-Control", "no-store");
+    const length = audioResponse.headers.get("content-length");
+    if (length) response.setHeader("Content-Length", length);
     if (!audioResponse.body) throw new Error("Resposta de audio sem corpo.");
     const body = audioResponse.body as unknown as Parameters<typeof Readable.fromWeb>[0];
     await pipeline(Readable.fromWeb(body), response);
@@ -512,6 +514,29 @@ export async function streamYouTubeAudio(
   });
 }
 
+async function probeYtDlpSize(
+  executable: string,
+  cookies: string[],
+  id: string,
+): Promise<number | null> {
+  const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  try {
+    const output = await collectOutput(executable, [
+      "-f",
+      "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+      "--no-warnings",
+      "--print",
+      "%(filesize,filesize_approx)s",
+      ...cookies,
+      watchUrl,
+    ]);
+    const size = Number.parseInt(output.trim(), 10);
+    return Number.isFinite(size) && size > 0 ? size : null;
+  } catch {
+    return null;
+  }
+}
+
 async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
   let executable: string;
   try {
@@ -520,6 +545,7 @@ async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<b
     return false;
   }
   const cookies = await cookieArgs();
+  const totalSize = await probeYtDlpSize(executable, cookies, id);
   return new Promise<boolean>((resolve) => {
     const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
     const child = spawn(
@@ -547,6 +573,7 @@ async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<b
         response.statusCode = 200;
         response.setHeader("Content-Type", contentType);
         response.setHeader("Cache-Control", "no-store");
+        if (totalSize) response.setHeader("Content-Length", String(totalSize));
       }
       response.write(chunk);
     });

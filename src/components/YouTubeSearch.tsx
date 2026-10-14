@@ -5,6 +5,7 @@ import {
   getYtDlpStatus,
   searchYouTube,
   youTubeIdFromUrl,
+  type DownloadProgress,
   type YouTubeResult,
 } from "../lib/youtube";
 
@@ -20,11 +21,18 @@ function formatViews(value: number | null): string {
   return `${value} views`;
 }
 
+function formatBytes(value: number): string {
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${value} B`;
+}
+
 export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<YouTubeResult[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [engine, setEngine] = useState<"loading" | "ready" | "error">("loading");
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -65,14 +73,16 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
     async (result: YouTubeResult) => {
       if (downloading) return;
       setDownloading(result.id);
+      setProgress({ loaded: 0, total: null });
       setError(null);
       try {
-        const file = await downloadYouTubeAudio(result.id, result.title);
+        const file = await downloadYouTubeAudio(result.id, result.title, setProgress);
         onSelect(file, { title: result.title, artist: result.channel });
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setDownloading(null);
+        setProgress(null);
       }
     },
     [downloading, onSelect],
@@ -112,6 +122,10 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   );
 
   const busy = disabled || searching || Boolean(downloading);
+  const percent =
+    progress && progress.total && progress.total > 0
+      ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
+      : null;
 
   return (
     <div className="yt">
@@ -145,7 +159,26 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
 
       {error && <p className="yt-note yt-note-error">{error}</p>}
       {searching && <p className="yt-note">Buscando resultados...</p>}
-      {downloading && <p className="yt-note">Baixando o audio selecionado...</p>}
+      {downloading && (
+        <div className="yt-progress" role="status" aria-live="polite">
+          <div className="yt-progress-head">
+            <span className="yt-note">Baixando o audio selecionado...</span>
+            <span className="yt-note yt-progress-pct">{percent !== null ? `${percent}%` : "..."}</span>
+          </div>
+          <div className="yt-bar">
+            <span
+              className={`yt-bar-fill${percent === null ? " yt-bar-fill-indeterminate" : ""}`}
+              style={percent !== null ? { width: `${percent}%` } : undefined}
+            />
+          </div>
+          {progress && (
+            <span className="yt-note">
+              {formatBytes(progress.loaded)}
+              {progress.total ? ` de ${formatBytes(progress.total)}` : ""}
+            </span>
+          )}
+        </div>
+      )}
 
       {results && results.length === 0 && !searching && (
         <p className="yt-note">Nenhum resultado encontrado.</p>

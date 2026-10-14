@@ -46,12 +46,50 @@ export async function searchYouTube(query: string): Promise<YouTubeResult[]> {
   return data.results;
 }
 
-export async function downloadYouTubeAudio(id: string, title: string): Promise<File> {
+export interface DownloadProgress {
+  loaded: number;
+  total: number | null;
+}
+
+export async function downloadYouTubeAudio(
+  id: string,
+  title: string,
+  onProgress?: (progress: DownloadProgress) => void,
+): Promise<File> {
   const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error(await describeError(response));
-  const blob = await response.blob();
-  if (blob.size === 0) throw new Error("O YouTube nao retornou audio para este video.");
-  const safe = title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80);
-  const ext = blob.type.includes("webm") ? "webm" : "m4a";
-  return new File([blob], `${safe || id}.${ext}`, { type: blob.type });
+
+  const contentType = response.headers.get("content-type")?.split(";")[0] ?? "audio/webm";
+  const lengthHeader = response.headers.get("content-length");
+  const total = lengthHeader ? Number.parseInt(lengthHeader, 10) : null;
+  const knownTotal = total && Number.isFinite(total) && total > 0 ? total : null;
+
+  const ext = contentType.includes("webm") ? "webm" : "m4a";
+  const filename = `${title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || id}.${ext}`;
+
+  if (!response.body) {
+    const blob = await response.blob();
+    if (blob.size === 0) throw new Error("O YouTube nao retornou audio.");
+    onProgress?.({ loaded: blob.size, total: blob.size });
+    return new File([blob], filename, { type: contentType });
+  }
+
+  const reader = response.body.getReader();
+  const chunks: BlobPart[] = [];
+  let loaded = 0;
+  onProgress?.({ loaded: 0, total: knownTotal });
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      loaded += value.length;
+      onProgress?.({ loaded, total: knownTotal });
+    }
+  }
+
+  if (loaded === 0) throw new Error("O YouTube nao retornou audio.");
+  onProgress?.({ loaded, total: knownTotal ?? loaded });
+  return new File(chunks, filename, { type: contentType });
 }
