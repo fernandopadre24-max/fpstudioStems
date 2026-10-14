@@ -58,6 +58,47 @@ export function ensureYtDlp(): Promise<string> {
   return preparation;
 }
 
+// Cookies do YouTube (env YTDLP_COOKIES) para autenticar o yt-dlp e driblar o
+// bloqueio "Sign in to confirm you're not a bot" em IPs de datacenter.
+// Aceita o conteudo do arquivo (formato Netscape) em texto ou em base64.
+let cookiesReady = false;
+let cookiesPath: string | null = null;
+
+function cookieFileContent(): string | null {
+  const raw = process.env.YTDLP_COOKIES?.trim();
+  if (!raw) return null;
+  if (!raw.includes("\t")) {
+    try {
+      const decoded = Buffer.from(raw, "base64").toString("utf8");
+      if (decoded.includes("\t")) return decoded;
+    } catch {
+      /* nao era base64 */
+    }
+  }
+  return raw.replace(/\\n/g, "\n");
+}
+
+export async function ensureCookies(): Promise<string | null> {
+  if (cookiesReady) return cookiesPath;
+  cookiesReady = true;
+  const content = cookieFileContent();
+  if (!content) return null;
+  try {
+    await fs.mkdir(binDir, { recursive: true });
+    const file = path.join(binDir, "cookies.txt");
+    await fs.writeFile(file, content, "utf8");
+    cookiesPath = file;
+  } catch {
+    cookiesPath = null;
+  }
+  return cookiesPath;
+}
+
+async function cookieArgs(): Promise<string[]> {
+  const file = await ensureCookies();
+  return file ? ["--cookies", file] : [];
+}
+
 async function prepareYtDlp(): Promise<string> {
   try {
     await fs.access(binaryPath);
@@ -141,6 +182,7 @@ async function searchYtDlp(query: string, limit = 20): Promise<YouTubeResult[]> 
     "--no-warnings",
     "--socket-timeout",
     "20",
+    ...(await cookieArgs()),
   ]);
 
   let parsed: { entries?: RawEntry[] };
@@ -458,7 +500,8 @@ export async function streamYouTubeAudio(
   response: ServerResponse,
 ): Promise<void> {
   const errors: string[] = [];
-  // Invidious primeiro: evita o download do yt-dlp no cold start.
+  // Com cookies configurados o yt-dlp autentica e funciona mesmo em datacenter.
+  if ((await ensureCookies()) && (await streamYtDlpAudio(id, response))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
   if (await streamYtDlpAudio(id, response)) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
@@ -469,65 +512,68 @@ export async function streamYouTubeAudio(
   });
 }
 
-function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
+async function streamYtDlpAudio(id: string, response: ServerResponse): Promise<boolean> {
+  let executable: string;
+  try {
+    executable = await ensureYtDlp();
+  } catch {
+    return false;
+  }
+  const cookies = await cookieArgs();
   return new Promise<boolean>((resolve) => {
-    ensureYtDlp().then(
-      (executable) => {
-        const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
-        const child = spawn(
-          executable,
-          [
-            "-f",
-            "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-            "-o",
-            "-",
-            "--no-playlist",
-            "--no-warnings",
-            "--no-part",
-            watchUrl,
-          ],
-          { windowsHide: true, env: childEnv },
-        );
-
-        let started = false;
-        let contentType = "audio/webm";
-
-        child.stdout.on("data", (chunk: Buffer) => {
-          if (!started) {
-            started = true;
-            response.statusCode = 200;
-            response.setHeader("Content-Type", contentType);
-            response.setHeader("Cache-Control", "no-store");
-          }
-          response.write(chunk);
-        });
-
-        child.stderr.on("data", () => undefined);
-
-        child.on("error", () => {
-          if (started) {
-            response.end();
-            resolve(true);
-          } else {
-            resolve(false);
-          }
-        });
-
-        child.on("close", () => {
-          if (started) {
-            response.end();
-            resolve(true);
-          } else {
-            resolve(false);
-          }
-        });
-
-        response.on("close", () => {
-          child.kill();
-        });
-      },
-      () => resolve(false),
+    const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+    const child = spawn(
+      executable,
+      [
+        "-f",
+        "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+        "-o",
+        "-",
+        "--no-playlist",
+        "--no-warnings",
+        "--no-part",
+        ...cookies,
+        watchUrl,
+      ],
+      { windowsHide: true, env: childEnv },
     );
+
+    let started = false;
+    const contentType = "audio/webm";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (!started) {
+        started = true;
+        response.statusCode = 200;
+        response.setHeader("Content-Type", contentType);
+        response.setHeader("Cache-Control", "no-store");
+      }
+      response.write(chunk);
+    });
+
+    child.stderr.on("data", () => undefined);
+
+    child.on("error", () => {
+      if (started) {
+        response.end();
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+
+    child.on("close", () => {
+      if (started) {
+        response.end();
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+
+    response.on("close", () => {
+      child.kill();
+    });
   });
 }
 
