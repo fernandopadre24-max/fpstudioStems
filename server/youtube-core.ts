@@ -237,7 +237,8 @@ interface InvidiousSearchItem {
 // o desafio Anubis quando a instancia exige verificacao.
 async function searchInvidious(query: string, limit: number): Promise<YouTubeResult[]> {
   const path = `/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
-  for (const base of INVIDIOUS_INSTANCES) {
+  const instances = await getInvidiousInstanceList();
+  for (const base of instances) {
     try {
       const data = await invidiousJson<InvidiousSearchItem[]>(base, path);
       if (!Array.isArray(data)) continue;
@@ -272,18 +273,66 @@ export async function searchYouTube(query: string, limit = 20): Promise<YouTubeR
 // recusa o IP da Vercel, entao o audio e servido pelo proxy da instancia
 // (que passa pelo desafio Anubis/PoW antes de liberar o bytes).
 
-const INVIDIOUS_INSTANCES = [
+const INVIDIOUS_INSTANCES_FALLBACK = [
   "https://invidious.f5.si",
   "https://invidious.nerdvpn.de",
   "https://inv.nadeko.net",
   "https://yewtu.be",
+  "https://invidious.tiekoetter.com",
+  "https://yt.chocolatemoo53.com",
+  "https://invidious.protokolla.fi",
+  "https://invidious.privacyredirect.com",
+  "https://invidious.perennialte.ch",
 ];
+
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 // Cookies de auth do Anubis por instancia (JWT valido por ~7 dias); revalidados
 // ao detectar um novo desafio, pois o JWT pode ficar preso ao IP de saida.
 const anubisCookies = new Map<string, string>();
+
+// Cache de instancias descobertas dinamicamente via api.invidious.io
+let cachedInstances: string[] = [];
+let instancesCachedAt = 0;
+const INSTANCES_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
+
+async function getInvidiousInstances(): Promise<string[]> {
+  const now = Date.now();
+  if (cachedInstances.length > 0 && now - instancesCachedAt < INSTANCES_CACHE_TTL_MS) {
+    return cachedInstances;
+  }
+  try {
+    const response = await fetch("https://api.invidious.io/instances.json", {
+      headers: { "User-Agent": CHROME_UA },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (response.ok) {
+      const data = (await response.json()) as [string, { type?: string; api?: boolean }][];
+      const discovered = data
+        .filter(([, info]) => info.type === "https" && info.api === true)
+        .map(([name]) => `https://${name}`);
+      if (discovered.length > 0) {
+        cachedInstances = discovered;
+        instancesCachedAt = now;
+        return cachedInstances;
+      }
+    }
+  } catch {
+    /* usa lista de fallback */
+  }
+  return INVIDIOUS_INSTANCES_FALLBACK;
+}
+
+async function getInvidiousInstanceList(): Promise<string[]> {
+  const discovered = await getInvidiousInstances();
+  // Combina descobertos + fallback sem duplicatas, descobertos primeiro
+  const merged = [...discovered];
+  for (const fb of INVIDIOUS_INSTANCES_FALLBACK) {
+    if (!merged.includes(fb)) merged.push(fb);
+  }
+  return merged;
+}
 
 function anubisPow(
   randomData: string,
@@ -414,9 +463,23 @@ function pickInvidiousAudio(data: InvidiousVideo): string | null {
   const audioFormats = (data.adaptiveFormats ?? []).filter((format) =>
     (format.type ?? "").startsWith("audio/"),
   );
+  // Preferencia: mp4/m4a sobre webm, pois tem compatibilidade maior
   const audio =
     audioFormats.find((format) => (format.type ?? "").startsWith("audio/mp4")) ?? audioFormats[0];
-  return audio?.url ?? null;
+  if (!audio?.url) return null;
+  return audio.url;
+}
+
+// Verifica se uma URL de audio esta sendo servida pelo proxy da instancia
+// (em vez de apontar diretamente para o googlevideo.com).
+function isProxiedUrl(base: string, url: string): boolean {
+  try {
+    const u = new URL(url);
+    const b = new URL(base);
+    return u.hostname === b.hostname;
+  } catch {
+    return false;
+  }
 }
 
 // Busca o fluxo de audio pela instancia, resolvendo o desafio Anubis.
@@ -464,21 +527,41 @@ async function fetchInvidiousStream(base: string, audioUrl: string): Promise<Res
   return null;
 }
 
+async function tryInvidiousInstance(
+  base: string,
+  id: string,
+  local: boolean,
+): Promise<Response | null> {
+  const data = await invidiousJson<InvidiousVideo>(
+    base,
+    `/api/v1/videos/${encodeURIComponent(id)}?local=${local ? "true" : "false"}`,
+  );
+  const audioUrl = data ? pickInvidiousAudio(data) : null;
+  if (!audioUrl) return null;
+
+  // Com local=false a URL deve ser proxiada pela instancia; com local=true
+  // aponta direto para o googlevideo. Verificamos se o proxy e real antes de tentar.
+  if (!local && !isProxiedUrl(base, audioUrl)) {
+    // Instancia nao esta proxiando — ignora e deixa cair no local=true
+    return null;
+  }
+
+  return fetchInvidiousStream(base, audioUrl);
+}
+
 async function openInvidiousAudio(id: string): Promise<Response> {
   let lastError = "Invidious indisponivel.";
-  for (const base of INVIDIOUS_INSTANCES) {
+  const instances = await getInvidiousInstanceList();
+  for (const base of instances) {
     try {
-      const data = await invidiousJson<InvidiousVideo>(
-        base,
-        `/api/v1/videos/${encodeURIComponent(id)}?local=true`,
-      );
-      const audioUrl = data ? pickInvidiousAudio(data) : null;
-      if (!audioUrl) {
-        lastError = `${base}: sem URL de audio`;
-        continue;
-      }
-      const stream = await fetchInvidiousStream(base, audioUrl);
-      if (stream) return stream;
+      // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
+      const proxied = await tryInvidiousInstance(base, id, false);
+      if (proxied) return proxied;
+
+      // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
+      const direct = await tryInvidiousInstance(base, id, true);
+      if (direct) return direct;
+
       lastError = `${base}: audio bloqueado`;
     } catch (cause) {
       lastError = `${base}: ${cause instanceof Error ? cause.message : String(cause)}`;

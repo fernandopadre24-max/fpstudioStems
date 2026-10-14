@@ -40,9 +40,14 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
   try {
     buffer = await decode(probe, raw);
   } catch {
-    throw new Error(
-      "Nao foi possivel decodificar esse arquivo. Tente MP3, WAV, M4A, OGG ou FLAC.",
-    );
+    // If direct decoding fails, try using HTMLAudioElement for formats like WebM
+    try {
+      buffer = await decodeAudioFileUsingAudioElement(raw);
+    } catch (audioElementError) {
+      throw new Error(
+        "Nao foi possivel decodificar esse arquivo. Tente MP3, WAV, M4A, OGG ou FLAC.",
+      );
+    }
   }
 
   if (Math.abs(buffer.sampleRate - SAMPLE_RATE) > 1) {
@@ -62,6 +67,67 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
       : new Float32Array(left);
 
   return { buffer, left, right, duration: buffer.duration };
+}
+
+// Fallback decoder using HTMLAudioElement for formats not supported by decodeAudioData
+async function decodeAudioFileUsingAudioElement(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([arrayBuffer], { type: 'audio/webm' }); // Assume WebM for YouTube, but could detect from file
+    const url = URL.createObjectURL(blob);
+    
+    const audio = new Audio();
+    audio.preload = 'auto';
+    
+    const handleSuccess = () => {
+      try {
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaElementSource(audio);
+        // Assume stereo (2 channels) for music audio
+        const offlineContext = new OfflineAudioContext({
+          numberOfChannels: 2,
+          length: Math.ceil(audioContext.sampleRate * audio.duration),
+          sampleRate: audioContext.sampleRate
+        });
+        
+        source.connect(offlineContext.destination);
+        audioContext.suspend(); // Suspend the real-time context
+        
+        offlineContext.startRendering().then((renderedBuffer) => {
+          URL.revokeObjectURL(url);
+          audioContext.close();
+          clearTimeout(timeoutId);
+          resolve(renderedBuffer);
+        }).catch((err) => {
+          URL.revokeObjectURL(url);
+          audioContext.close();
+          clearTimeout(timeoutId);
+          reject(err);
+        });
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        clearTimeout(timeoutId);
+        reject(err);
+      }
+    };
+    
+    const handleError = (err: ErrorEvent) => {
+      URL.revokeObjectURL(url);
+      clearTimeout(timeoutId);
+      reject(err.error);
+    };
+    
+    audio.addEventListener('canplay', handleSuccess);
+    audio.addEventListener('error', handleError);
+    audio.src = url;
+    
+    // Timeout to prevent hanging
+    const timeoutId = setTimeout(() => {
+      audio.removeEventListener('canplay', handleSuccess);
+      audio.removeEventListener('error', handleError);
+      URL.revokeObjectURL(url);
+      reject(new Error('Audio decoding timeout'));
+    }, 30000); // 30 second timeout
+  });
 }
 
 export interface SampleRange {
