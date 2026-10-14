@@ -175,23 +175,27 @@ interface InvidiousSearchItem {
 // o desafio Anubis quando a instancia exige verificacao.
 async function searchInvidious(query: string, limit: number): Promise<YouTubeResult[]> {
   const path = `/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
-  try {
-    const data = await invidiousJson<InvidiousSearchItem[]>(path);
-    if (!Array.isArray(data)) return [];
-    return data
-      .filter((item) => /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId ?? ""))
-      .slice(0, limit)
-      .map((item) => ({
-        id: item.videoId as string,
-        title: item.title ?? "",
-        channel: item.author ?? "",
-        duration: typeof item.lengthSeconds === "number" ? item.lengthSeconds : null,
-        viewCount: typeof item.viewCount === "number" ? item.viewCount : null,
-        thumbnail: `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
-      }));
-  } catch {
-    return [];
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      const data = await invidiousJson<InvidiousSearchItem[]>(base, path);
+      if (!Array.isArray(data)) continue;
+      const mapped = data
+        .filter((item) => /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId ?? ""))
+        .slice(0, limit)
+        .map((item) => ({
+          id: item.videoId as string,
+          title: item.title ?? "",
+          channel: item.author ?? "",
+          duration: typeof item.lengthSeconds === "number" ? item.lengthSeconds : null,
+          viewCount: typeof item.viewCount === "number" ? item.viewCount : null,
+          thumbnail: `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+        }));
+      if (mapped.length > 0) return mapped;
+    } catch {
+      /* tenta a proxima instancia */
+    }
   }
+  return [];
 }
 
 export async function searchYouTube(query: string, limit = 20): Promise<YouTubeResult[]> {
@@ -206,13 +210,18 @@ export async function searchYouTube(query: string, limit = 20): Promise<YouTubeR
 // recusa o IP da Vercel, entao o audio e servido pelo proxy da instancia
 // (que passa pelo desafio Anubis/PoW antes de liberar o bytes).
 
-const INVIDIOUS_BASE = "https://invidious.f5.si";
+const INVIDIOUS_INSTANCES = [
+  "https://invidious.f5.si",
+  "https://invidious.nerdvpn.de",
+  "https://inv.nadeko.net",
+  "https://yewtu.be",
+];
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-// Cookie de auth do Anubis (JWT valido por ~7 dias); revalidado ao detectar
-// um novo desafio, pois o JWT pode ficar preso ao IP de saida da funcao.
-let anubisCookie: string | null = null;
+// Cookies de auth do Anubis por instancia (JWT valido por ~7 dias); revalidados
+// ao detectar um novo desafio, pois o JWT pode ficar preso ao IP de saida.
+const anubisCookies = new Map<string, string>();
 
 function anubisPow(
   randomData: string,
@@ -239,7 +248,7 @@ interface AnubisSolve {
   error: string;
 }
 
-async function solveAnubis(pageUrl: string): Promise<AnubisSolve> {
+async function solveAnubis(base: string, pageUrl: string): Promise<AnubisSolve> {
   try {
     const challengeResponse = await fetch(pageUrl, {
       headers: {
@@ -270,7 +279,7 @@ async function solveAnubis(pageUrl: string): Promise<AnubisSolve> {
 
     const target = new URL(pageUrl);
     const passUrl =
-      `${INVIDIOUS_BASE}/.within.website/x/cmd/anubis/api/pass-challenge` +
+      `${base}/.within.website/x/cmd/anubis/api/pass-challenge` +
       `?id=${encodeURIComponent(parsed.challenge.id)}` +
       `&response=${solution.hash}` +
       `&nonce=${solution.nonce}` +
@@ -299,14 +308,15 @@ async function solveAnubis(pageUrl: string): Promise<AnubisSolve> {
 
 // GET JSON de uma rota da instancia Invidious, resolvendo o desafio Anubis
 // quando a resposta volta como HTML e revalidando o cookie se for recusado.
-async function invidiousJson<T>(pathAndQuery: string): Promise<T | null> {
-  const url = `${INVIDIOUS_BASE}${pathAndQuery}`;
+async function invidiousJson<T>(base: string, pathAndQuery: string): Promise<T | null> {
+  const url = `${base}${pathAndQuery}`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const headers: Record<string, string> = {
       "User-Agent": CHROME_UA,
       Accept: "application/json",
     };
-    if (anubisCookie) headers.Cookie = anubisCookie;
+    const cookie = anubisCookies.get(base);
+    if (cookie) headers.Cookie = cookie;
     const response = await fetch(url, {
       headers,
       redirect: "manual",
@@ -316,15 +326,17 @@ async function invidiousJson<T>(pathAndQuery: string): Promise<T | null> {
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType.includes("text/html")) {
         await response.text();
-        const solved = await solveAnubis(url);
-        anubisCookie = solved.cookie;
-        if (anubisCookie) continue;
+        const solved = await solveAnubis(base, url);
+        if (solved.cookie) {
+          anubisCookies.set(base, solved.cookie);
+          continue;
+        }
         return null;
       }
       return (await response.json()) as T;
     }
-    if ((response.status === 401 || response.status === 403) && anubisCookie) {
-      anubisCookie = null;
+    if ((response.status === 401 || response.status === 403) && anubisCookies.has(base)) {
+      anubisCookies.delete(base);
       continue;
     }
     return null;
@@ -336,23 +348,23 @@ interface InvidiousVideo {
   adaptiveFormats?: Array<{ type?: string; url?: string }>;
 }
 
-async function openInvidiousAudio(id: string): Promise<Response> {
-  const data = await invidiousJson<InvidiousVideo>(
-    `/api/v1/videos/${encodeURIComponent(id)}?local=true`,
-  );
-  if (!data) throw new Error("Invidious nao respondeu a API de video.");
+function pickInvidiousAudio(data: InvidiousVideo): string | null {
   const audioFormats = (data.adaptiveFormats ?? []).filter((format) =>
     (format.type ?? "").startsWith("audio/"),
   );
   const audio =
     audioFormats.find((format) => (format.type ?? "").startsWith("audio/mp4")) ?? audioFormats[0];
-  if (!audio?.url) throw new Error("Invidious nao retornou URL de audio.");
+  return audio?.url ?? null;
+}
 
-  let audioUrl = audio.url;
+// Busca o fluxo de audio pela instancia, resolvendo o desafio Anubis.
+async function fetchInvidiousStream(base: string, audioUrl: string): Promise<Response | null> {
+  let current = audioUrl;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const headers: Record<string, string> = { "User-Agent": CHROME_UA };
-    if (anubisCookie) headers.Cookie = anubisCookie;
-    const audioResponse = await fetch(audioUrl, {
+    const cookie = anubisCookies.get(base);
+    if (cookie) headers.Cookie = cookie;
+    const audioResponse = await fetch(current, {
       headers,
       redirect: "manual",
       signal: AbortSignal.timeout(60_000),
@@ -362,31 +374,55 @@ async function openInvidiousAudio(id: string): Promise<Response> {
       const contentType = audioResponse.headers.get("content-type") ?? "";
       if (contentType.includes("text/html")) {
         await audioResponse.text();
-        const solved = await solveAnubis(audioUrl);
-        anubisCookie = solved.cookie;
-        if (!anubisCookie) throw new Error(`Invidious anti-bot: ${solved.error}`);
-        continue;
+        const solved = await solveAnubis(base, current);
+        if (solved.cookie) {
+          anubisCookies.set(base, solved.cookie);
+          continue;
+        }
+        return null;
       }
       return audioResponse;
     }
 
     if (audioResponse.status >= 300 && audioResponse.status < 400) {
       const location = audioResponse.headers.get("location");
-      if (location?.startsWith(INVIDIOUS_BASE)) {
-        audioUrl = location;
+      if (location?.startsWith(base)) {
+        current = location;
         continue;
       }
-      throw new Error(`Invidious redirecionou (HTTP ${audioResponse.status}).`);
+      return null;
     }
 
     if (attempt === 0 && (audioResponse.status === 401 || audioResponse.status === 403)) {
-      // cookie possivelmente preso a outro IP de saida: refaz o fluxo completo
-      anubisCookie = null;
+      anubisCookies.delete(base);
       continue;
     }
-    throw new Error(`Invidious audio HTTP ${audioResponse.status}.`);
+    return null;
   }
-  throw new Error("Invidious nao retornou audio.");
+  return null;
+}
+
+async function openInvidiousAudio(id: string): Promise<Response> {
+  let lastError = "Invidious indisponivel.";
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      const data = await invidiousJson<InvidiousVideo>(
+        base,
+        `/api/v1/videos/${encodeURIComponent(id)}?local=true`,
+      );
+      const audioUrl = data ? pickInvidiousAudio(data) : null;
+      if (!audioUrl) {
+        lastError = `${base}: sem URL de audio`;
+        continue;
+      }
+      const stream = await fetchInvidiousStream(base, audioUrl);
+      if (stream) return stream;
+      lastError = `${base}: audio bloqueado`;
+    } catch (cause) {
+      lastError = `${base}: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
+  }
+  throw new Error(lastError);
 }
 
 async function streamInvidiousAudio(
@@ -530,44 +566,6 @@ export async function handleYouTubeApi(
         return;
       }
       await streamYouTubeAudio(id, response);
-      return;
-    }
-
-    if (route === "debug") {
-      const id = (requestUrl.searchParams.get("id") ?? "fJ9rUzIMcZQ").trim();
-      const report: Record<string, unknown> = {};
-      for (const local of ["true", "false"]) {
-        try {
-          const r = await fetch(
-            `${INVIDIOUS_BASE}/api/v1/videos/${encodeURIComponent(id)}?local=${local}`,
-            {
-              headers: { "User-Agent": CHROME_UA, Accept: "application/json" },
-              signal: AbortSignal.timeout(20_000),
-            },
-          );
-          const text = await r.text();
-          report[`invidious_local_${local}`] = {
-            status: r.status,
-            contentType: r.headers.get("content-type"),
-            head: text.replace(/\s+/g, " ").slice(0, 200),
-          };
-        } catch (cause) {
-          report[`invidious_local_${local}`] = String(cause);
-        }
-      }
-      try {
-        const exe = await ensureYtDlp();
-        const out = await collectOutput(exe, [
-          "--simulate",
-          "--dump-json",
-          "--no-warnings",
-          `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
-        ]);
-        report.ytdlp = { ok: true, head: out.replace(/\s+/g, " ").slice(0, 200) };
-      } catch (cause) {
-        report.ytdlp = { ok: false, error: String(cause).slice(0, 400) };
-      }
-      sendJson(response, 200, report);
       return;
     }
 
