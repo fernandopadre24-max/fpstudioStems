@@ -218,7 +218,7 @@ export default function App() {
           setModelStatus("missing");
           break;
         case "model-progress":
-          setModelStatus(message.cached && message.loaded >= message.total ? "ready" : "downloading");
+          setModelStatus(message.loaded >= message.total ? "ready" : "downloading");
           setModelProgress({ loaded: message.loaded, total: message.total, cached: message.cached });
           break;
         case "session":

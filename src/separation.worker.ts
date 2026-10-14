@@ -98,11 +98,9 @@ async function downloadModel(model: StemModelMeta): Promise<Blob> {
 
   const blob = new Blob(chunks, { type: "application/octet-stream" });
   if (cache) {
-    try {
-      await cache.put(model.url, new Response(blob));
-    } catch {
+    cache.put(model.url, new Response(blob)).catch(() => {
       /* quota cheia: seguimos apenas em memoria */
-    }
+    });
   }
   modelBlobs.set(model.url, blob);
   return blob;
@@ -117,11 +115,13 @@ let webgpuUsable = true;
 
 function applyPrefs(blockWebgpu: boolean) {
   webgpuUsable = !blockWebgpu;
+  webgpuAdapter = null;
 }
 
 async function getSession(model: StemModelMeta, backend: Backend): Promise<SessionHandle> {
-  const preferred =
-    backend === "wasm" ? "wasm" : backend === "webgpu" ? "webgpu" : detectPreferred();
+  const requestedGpu = backend === "webgpu";
+  const preferred: "webgpu" | "wasm" =
+    requestedGpu && (await hasWebgpuAdapter()) ? "webgpu" : "wasm";
 
   const cached = sessions.get(`${model.id}:${preferred}`);
   if (cached) return { session: cached, backend: preferred };
@@ -131,7 +131,12 @@ async function getSession(model: StemModelMeta, backend: Backend): Promise<Sessi
 
   if (preferred === "webgpu") {
     try {
-      const session = await createSession(bytes, ["webgpu", "wasm"], `${model.id}:webgpu`);
+      const session = await createSession(
+        bytes,
+        ["webgpu", "wasm"],
+        `${model.id}:webgpu`,
+        SESSION_CREATE_TIMEOUT_MS,
+      );
       sessions.set(`${model.id}:webgpu`, session);
       post({ type: "session", backend: "webgpu", fellBack: false });
       return { session, backend: "webgpu" };
@@ -151,7 +156,15 @@ async function getSession(model: StemModelMeta, backend: Backend): Promise<Sessi
 
   const session = await createSession(bytes, ["wasm"], `${model.id}:wasm`);
   sessions.set(`${model.id}:wasm`, session);
-  if (preferred !== "webgpu") post({ type: "session", backend: "wasm", fellBack: false });
+  if (preferred !== "webgpu") {
+    post({
+      type: "session",
+      backend: "wasm",
+      fellBack: requestedGpu,
+      gpuBroken: requestedGpu,
+      reason: requestedGpu ? "WebGPU indisponivel neste navegador; usando CPU (WASM)." : undefined,
+    });
+  }
   return { session, backend: "wasm" };
 }
 
@@ -163,10 +176,58 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+class TimeoutError extends Error {}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+const SESSION_CREATE_TIMEOUT_MS = 10_000;
+const ADAPTER_TIMEOUT_MS = 5_000;
+
+let webgpuAdapter: boolean | null = null;
+
+async function hasWebgpuAdapter(): Promise<boolean> {
+  if (!webgpuUsable) return false;
+  if (
+    typeof navigator === "undefined" ||
+    !("gpu" in navigator) ||
+    !(navigator as Navigator & { gpu?: unknown }).gpu
+  ) {
+    return false;
+  }
+  if (webgpuAdapter !== null) return webgpuAdapter;
+  try {
+    const gpu = (navigator as Navigator & { gpu: { requestAdapter(): Promise<unknown> } }).gpu;
+    const adapter = await withTimeout(
+      gpu.requestAdapter(),
+      ADAPTER_TIMEOUT_MS,
+      "Tempo esgotado ao acessar a GPU.",
+    );
+    webgpuAdapter = !!adapter;
+  } catch {
+    webgpuAdapter = false;
+  }
+  return webgpuAdapter;
+}
+
 async function createSession(
   bytes: ArrayBuffer,
   executionProviders: string[],
   key: string,
+  attemptTimeoutMs?: number,
 ): Promise<ort.InferenceSession> {
   const memo = optLevelByProvider.get(key);
   const levels: OptLevel[] = memo
@@ -176,26 +237,25 @@ async function createSession(
   let lastError: unknown = new Error("Falha ao carregar o modelo.");
   for (const graphOptimizationLevel of levels) {
     try {
-      const session = await ort.InferenceSession.create(bytes, {
+      const create = ort.InferenceSession.create(bytes, {
         executionProviders,
         graphOptimizationLevel,
       });
+      const session = attemptTimeoutMs
+        ? await withTimeout(
+            create,
+            attemptTimeoutMs,
+            "Tempo esgotado ao carregar o modelo na GPU.",
+          )
+        : await create;
       optLevelByProvider.set(key, graphOptimizationLevel);
       return session;
     } catch (error) {
       lastError = error;
+      if (error instanceof TimeoutError) break;
     }
   }
   throw lastError;
-}
-
-function detectPreferred(): "webgpu" | "wasm" {
-  if (!webgpuUsable) return "wasm";
-  return typeof navigator !== "undefined" &&
-    "gpu" in navigator &&
-    (navigator as Navigator & { gpu?: unknown }).gpu
-    ? "webgpu"
-    : "wasm";
 }
 
 const SEGMENT_TIMEOUT_MS = 90_000;
