@@ -226,38 +226,6 @@ async function searchYtDlp(query: string, limit = 20): Promise<YouTubeResult[]> 
     }));
 }
 
-// Diagnostico: testa um player_client do yt-dlp contra o YouTube neste host.
-export async function probeYtDlpClient(
-  id: string,
-  client: string,
-): Promise<{ client: string; ok: boolean; message: string }> {
-  let executable: string;
-  try {
-    executable = await ensureYtDlp();
-  } catch (cause) {
-    return { client, ok: false, message: `yt-dlp indisponivel: ${String(cause)}` };
-  }
-  const args = [
-    "-f",
-    "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-    "--simulate",
-    "--no-warnings",
-    "--socket-timeout",
-    "20",
-    "--print",
-    "%(format_id)s|%(acodec)s|%(filesize,filesize_approx)s",
-  ];
-  if (client) args.push("--extractor-args", `youtube:player_client=${client}`);
-  args.push(...(await cookieArgs()), `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`);
-  try {
-    const output = await collectOutput(executable, args);
-    return { client, ok: true, message: output.trim().slice(0, 200) };
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    return { client, ok: false, message: message.replace(/\s+/g, " ").trim().slice(0, 300) };
-  }
-}
-
 interface InvidiousSearchItem {
   videoId?: string;
   title?: string;
@@ -795,14 +763,6 @@ export async function handleYouTubeApi(
         return;
       }
       await streamYouTubeAudio(id, response);
-      return;
-    }
-
-    if (route === "probe") {
-      const id = (requestUrl.searchParams.get("id") ?? "fJ9rUzIMcZQ").trim();
-      const client = (requestUrl.searchParams.get("client") ?? "").trim();
-      const result = await probeYtDlpClient(id, client);
-      sendJson(response, 200, result);
       return;
     }
 
