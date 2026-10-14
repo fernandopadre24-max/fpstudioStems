@@ -608,16 +608,17 @@ async function streamInvidiousAudio(
 export async function streamYouTubeAudio(
   id: string,
   response: ServerResponse,
+  playerClient?: string,
 ): Promise<void> {
   const errors: string[] = [];
   const hasCookies = Boolean(await ensureCookies());
   errors.push(cookieStatus());
   // Local (sem VERCEL): o IP nao e datacenter, entao o yt-dlp funciona direto.
   // No Vercel, sem cookies o yt-dlp e bloqueado -> Invidious primeiro.
-  const preferYtDlp = hasCookies || !process.env.VERCEL;
-  if (preferYtDlp && (await streamYtDlpAudio(id, response, errors))) return;
+  const preferYtDlp = hasCookies || !process.env.VERCEL || Boolean(playerClient);
+  if (preferYtDlp && (await streamYtDlpAudio(id, response, errors, playerClient))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
-  if (await streamYtDlpAudio(id, response, errors)) return;
+  if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
   sendJson(response, 502, {
     error:
@@ -630,6 +631,7 @@ async function probeYtDlpSize(
   executable: string,
   cookies: string[],
   id: string,
+  playerClient?: string,
 ): Promise<number | null> {
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
   try {
@@ -639,6 +641,7 @@ async function probeYtDlpSize(
       "--no-warnings",
       "--print",
       "%(filesize,filesize_approx)s",
+      ...clientArgs(playerClient),
       ...cookies,
       watchUrl,
     ]);
@@ -649,10 +652,15 @@ async function probeYtDlpSize(
   }
 }
 
+function clientArgs(playerClient?: string): string[] {
+  return playerClient ? ["--extractor-args", `youtube:player_client=${playerClient}`] : [];
+}
+
 async function streamYtDlpAudio(
   id: string,
   response: ServerResponse,
   errors: string[] = [],
+  playerClient?: string,
 ): Promise<boolean> {
   let executable: string;
   try {
@@ -662,7 +670,7 @@ async function streamYtDlpAudio(
     return false;
   }
   const cookies = await cookieArgs();
-  const totalSize = await probeYtDlpSize(executable, cookies, id);
+  const totalSize = await probeYtDlpSize(executable, cookies, id, playerClient);
   return new Promise<boolean>((resolve) => {
     const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
     const child = spawn(
@@ -675,6 +683,7 @@ async function streamYtDlpAudio(
         "--no-playlist",
         "--no-warnings",
         "--no-part",
+        ...clientArgs(playerClient),
         ...cookies,
         watchUrl,
       ],
@@ -767,7 +776,8 @@ export async function handleYouTubeApi(
         sendJson(response, 400, { error: "Identificador de video invalido." });
         return;
       }
-      await streamYouTubeAudio(id, response);
+      const playerClient = requestUrl.searchParams.get("client")?.trim() || undefined;
+      await streamYouTubeAudio(id, response, playerClient);
       return;
     }
 
