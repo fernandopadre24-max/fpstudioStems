@@ -72,13 +72,16 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   const pick = useCallback(
     async (result: YouTubeResult) => {
       if (downloading) return;
+      console.log('[YouTubeSearch] Starting download for:', result.id, result.title);
       setDownloading(result.id);
       setProgress({ loaded: 0, total: null });
       setError(null);
       try {
         const file = await downloadYouTubeAudio(result.id, result.title, setProgress);
+        console.log('[YouTubeSearch] Download complete, file:', file.name, file.size, file.type);
         onSelect(file, { title: result.title, artist: result.channel });
       } catch (cause) {
+        console.error('[YouTubeSearch] Download error:', cause);
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setDownloading(null);

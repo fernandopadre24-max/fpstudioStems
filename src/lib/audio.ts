@@ -33,17 +33,24 @@ function decode(context: BaseAudioContext, data: ArrayBuffer): Promise<AudioBuff
 }
 
 export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
+  console.log('[decodeAudioFile] Starting decode for:', file.name, file.size, file.type);
   const raw = await file.arrayBuffer();
+  console.log('[decodeAudioFile] Got arrayBuffer, length:', raw.byteLength);
   const probe = new OfflineAudioContext({ numberOfChannels: 2, length: 1, sampleRate: SAMPLE_RATE });
 
   let buffer: AudioBuffer;
   try {
+    console.log('[decodeAudioFile] Trying standard decodeAudioData...');
     buffer = await decode(probe, raw);
-  } catch {
+    console.log('[decodeAudioFile] Standard decode successful');
+  } catch (err) {
+    console.log('[decodeAudioFile] Standard decode failed, trying HTMLAudioElement fallback:', err);
     // If direct decoding fails, try using HTMLAudioElement for formats like WebM
     try {
       buffer = await decodeAudioFileUsingAudioElement(raw);
+      console.log('[decodeAudioFile] Fallback decode successful');
     } catch (audioElementError) {
+      console.error('[decodeAudioFile] Both decode methods failed:', audioElementError);
       throw new Error(
         "Nao foi possivel decodificar esse arquivo. Tente MP3, WAV, M4A, OGG ou FLAC.",
       );
@@ -51,6 +58,7 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
   }
 
   if (Math.abs(buffer.sampleRate - SAMPLE_RATE) > 1) {
+    console.log('[decodeAudioFile] Resampling from', buffer.sampleRate, 'to', SAMPLE_RATE);
     const frames = Math.ceil(buffer.duration * SAMPLE_RATE);
     const resampler = new OfflineAudioContext(2, frames, SAMPLE_RATE);
     const source = resampler.createBufferSource();
@@ -58,6 +66,7 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
     source.connect(resampler.destination);
     source.start();
     buffer = await resampler.startRendering();
+    console.log('[decodeAudioFile] Resampling complete');
   }
 
   const left = new Float32Array(buffer.getChannelData(0));
@@ -66,21 +75,30 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
       ? new Float32Array(buffer.getChannelData(1))
       : new Float32Array(left);
 
+  console.log('[decodeAudioFile] Returning DecodedAudio, duration:', buffer.duration);
   return { buffer, left, right, duration: buffer.duration };
 }
 
 // Fallback decoder using HTMLAudioElement for formats not supported by decodeAudioData
 async function decodeAudioFileUsingAudioElement(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
+  console.log('[decodeAudioFileUsingAudioElement] Starting fallback decode, buffer length:', arrayBuffer.byteLength);
   return new Promise((resolve, reject) => {
-    const blob = new Blob([arrayBuffer], { type: 'audio/webm' }); // Assume WebM for YouTube, but could detect from file
+    const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
+    console.log('[decodeAudioFileUsingAudioElement] Created blob:', blob.size, blob.type);
     const url = URL.createObjectURL(blob);
     
     const audio = new Audio();
     audio.preload = 'auto';
     
-    const handleSuccess = () => {
+    const handleSuccess = async () => {
+      console.log('[decodeAudioFileUsingAudioElement] Audio canplay, duration:', audio.duration);
       try {
+        // Start playing the audio so MediaElementSource can capture it
+        await audio.play();
+        console.log('[decodeAudioFileUsingAudioElement] Audio playing');
+        
         const audioContext = new AudioContext();
+        console.log('[decodeAudioFileUsingAudioElement] Created AudioContext, sampleRate:', audioContext.sampleRate);
         const source = audioContext.createMediaElementSource(audio);
         // Assume stereo (2 channels) for music audio
         const offlineContext = new OfflineAudioContext({
@@ -93,17 +111,20 @@ async function decodeAudioFileUsingAudioElement(arrayBuffer: ArrayBuffer): Promi
         audioContext.suspend(); // Suspend the real-time context
         
         offlineContext.startRendering().then((renderedBuffer) => {
+          console.log('[decodeAudioFileUsingAudioElement] Offline rendering complete, duration:', renderedBuffer.duration);
           URL.revokeObjectURL(url);
           audioContext.close();
           clearTimeout(timeoutId);
           resolve(renderedBuffer);
         }).catch((err) => {
+          console.error('[decodeAudioFileUsingAudioElement] Offline rendering failed:', err);
           URL.revokeObjectURL(url);
           audioContext.close();
           clearTimeout(timeoutId);
           reject(err);
         });
       } catch (err) {
+        console.error('[decodeAudioFileUsingAudioElement] AudioContext setup or play failed:', err);
         URL.revokeObjectURL(url);
         clearTimeout(timeoutId);
         reject(err);
@@ -111,6 +132,7 @@ async function decodeAudioFileUsingAudioElement(arrayBuffer: ArrayBuffer): Promi
     };
     
     const handleError = (err: ErrorEvent) => {
+      console.error('[decodeAudioFileUsingAudioElement] Audio element error:', err);
       URL.revokeObjectURL(url);
       clearTimeout(timeoutId);
       reject(err.error);
@@ -122,6 +144,7 @@ async function decodeAudioFileUsingAudioElement(arrayBuffer: ArrayBuffer): Promi
     
     // Timeout to prevent hanging
     const timeoutId = setTimeout(() => {
+      console.error('[decodeAudioFileUsingAudioElement] Timeout after 30s');
       audio.removeEventListener('canplay', handleSuccess);
       audio.removeEventListener('error', handleError);
       URL.revokeObjectURL(url);

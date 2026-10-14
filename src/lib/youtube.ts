@@ -56,7 +56,9 @@ export async function downloadYouTubeAudio(
   title: string,
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<File> {
+  console.log('[downloadYouTubeAudio] Starting download for:', id);
   const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`);
+  console.log('[downloadYouTubeAudio] Response status:', response.status, response.ok);
   if (!response.ok) throw new Error(await describeError(response));
 
   const contentType = response.headers.get("content-type")?.split(";")[0] ?? "audio/webm";
@@ -69,6 +71,7 @@ export async function downloadYouTubeAudio(
 
   if (!response.body) {
     const blob = await response.blob();
+    console.log('[downloadYouTubeAudio] Got blob:', blob.size, blob.type);
     if (blob.size === 0) throw new Error("O YouTube nao retornou audio.");
     onProgress?.({ loaded: blob.size, total: blob.size });
     return new File([blob], filename, { type: contentType });
@@ -90,6 +93,7 @@ export async function downloadYouTubeAudio(
   }
 
   if (loaded === 0) throw new Error("O YouTube nao retornou audio.");
+  console.log('[downloadYouTubeAudio] Download complete, total bytes:', loaded);
   onProgress?.({ loaded, total: knownTotal ?? loaded });
   return new File(chunks, filename, { type: contentType });
 }

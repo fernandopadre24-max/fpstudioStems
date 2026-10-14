@@ -318,6 +318,7 @@ export default function App() {
 
   const handleFile = useCallback(
     async (next: File, meta?: { title: string; artist: string }) => {
+      console.log('[App.handleFile] Received file:', next.name, next.size, next.type, 'meta:', meta);
       setError(null);
       setResults(null);
       setInstrumental(null);
@@ -343,12 +344,15 @@ export default function App() {
       setActivePlayback(null);
       setSelection(null);
       try {
+        console.log('[App.handleFile] Starting decodeAudioFile...');
         const audio = await decodeAudioFile(next);
+        console.log('[App.handleFile] Decode complete, duration:', audio.duration);
         setDecoded(audio);
         setOriginalBuffer(audio.buffer);
         setOriginalPeaks(computePeaks(audio.left, audio.right));
         setPhase("ready");
       } catch (cause) {
+        console.error('[App.handleFile] Decode error:', cause);
         setFile(null);
         setPhase("idle");
         setError(cause instanceof Error ? cause.message : String(cause));
