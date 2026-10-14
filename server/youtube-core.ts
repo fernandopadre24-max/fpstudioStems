@@ -66,7 +66,9 @@ let cookiesPath: string | null = null;
 let cookiesStatusText = "cookies:nao";
 
 function looksLikeCookies(content: string): boolean {
-  return content.includes("\t") || content.includes("# Netscape HTTP Cookie File");
+  if (content.includes("# Netscape HTTP Cookie File")) return true;
+  // Formato Netscape: 7 colunas separadas por tab (>= 6 tabs por linha).
+  return content.split(/\r?\n/).some((line) => (line.match(/\t/g)?.length ?? 0) >= 6);
 }
 
 function resolveCookieContent(): string | null {
