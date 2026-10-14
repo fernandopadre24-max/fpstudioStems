@@ -63,30 +63,42 @@ export function ensureYtDlp(): Promise<string> {
 // Aceita o conteudo do arquivo (formato Netscape) em texto ou em base64.
 let cookiesReady = false;
 let cookiesPath: string | null = null;
-
-function cookieFileContent(): string | null {
-  const raw = process.env.YTDLP_COOKIES?.trim();
-  if (!raw) return null;
-  if (!raw.includes("\t")) {
-    try {
-      const decoded = Buffer.from(raw, "base64").toString("utf8");
-      if (decoded.includes("\t")) return decoded;
-    } catch {
-      /* nao era base64 */
-    }
-  }
-  return raw.replace(/\\n/g, "\n");
-}
+let cookiesStatusText = "cookies:nao";
 
 function looksLikeCookies(content: string): boolean {
   return content.includes("\t") || content.includes("# Netscape HTTP Cookie File");
 }
 
+function resolveCookieContent(): string | null {
+  const raw = process.env.YTDLP_COOKIES?.trim();
+  if (!raw) return null;
+  const text = raw.replace(/\\n/g, "\n");
+  if (looksLikeCookies(text)) return text;
+  const decoded = Buffer.from(raw, "base64").toString("utf8");
+  return looksLikeCookies(decoded) ? decoded : null;
+}
+
+function describeCookieValue(): string {
+  const raw = process.env.YTDLP_COOKIES?.trim();
+  if (!raw) return "cookies:nao (variavel ausente)";
+  const resolved = resolveCookieContent();
+  if (resolved) {
+    const viaBase64 = !raw.includes("\t");
+    return `cookies:sim (${resolved.length} bytes${viaBase64 ? ", base64" : ""})`;
+  }
+  let kind = "texto";
+  if (/^\s*[[{]/.test(raw)) kind = "json";
+  else if (/^\s*</.test(raw)) kind = "html";
+  const sample = raw.length <= 120 ? `; valor=\`${raw.slice(0, 60)}\`` : "";
+  return `cookies:formato invalido (${raw.length} chars, ${kind}${sample})`;
+}
+
 export async function ensureCookies(): Promise<string | null> {
   if (cookiesReady) return cookiesPath;
   cookiesReady = true;
-  const content = cookieFileContent();
-  if (!content || !looksLikeCookies(content)) return null;
+  cookiesStatusText = describeCookieValue();
+  const content = resolveCookieContent();
+  if (!content) return null;
   try {
     await fs.mkdir(binDir, { recursive: true });
     const file = path.join(binDir, "cookies.txt");
@@ -96,6 +108,10 @@ export async function ensureCookies(): Promise<string | null> {
     cookiesPath = null;
   }
   return cookiesPath;
+}
+
+export function cookieStatus(): string {
+  return cookiesStatusText;
 }
 
 async function cookieArgs(): Promise<string[]> {
@@ -506,15 +522,8 @@ export async function streamYouTubeAudio(
   response: ServerResponse,
 ): Promise<void> {
   const errors: string[] = [];
-  const rawCookies = Boolean(process.env.YTDLP_COOKIES?.trim());
   const hasCookies = Boolean(await ensureCookies());
-  errors.push(
-    hasCookies
-      ? "cookies:sim"
-      : rawCookies
-        ? "cookies:formato invalido (use o base64 do cookies.txt Netscape)"
-        : "cookies:nao",
-  );
+  errors.push(cookieStatus());
   // Com cookies configurados o yt-dlp autentica e funciona mesmo em datacenter.
   if (hasCookies && (await streamYtDlpAudio(id, response, errors))) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
