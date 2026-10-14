@@ -55,9 +55,9 @@ export async function downloadYouTubeAudio(
   id: string,
   title: string,
   onProgress?: (progress: DownloadProgress) => void,
+  signal?: AbortSignal,
 ): Promise<File> {
-  console.log('[downloadYouTubeAudio] Starting download for:', id);
-  const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`);
+  const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`, { signal });
   console.log('[downloadYouTubeAudio] Response status:', response.status, response.ok);
   if (!response.ok) throw new Error(await describeError(response));
 

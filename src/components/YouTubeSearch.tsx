@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { formatTime } from "../lib/audio";
 import {
   downloadYouTubeAudio,
@@ -33,6 +33,8 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   const [searching, setSearching] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [engine, setEngine] = useState<"loading" | "ready" | "error">("loading");
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -75,21 +77,41 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
       console.log('[YouTubeSearch] Starting download for:', result.id, result.title);
       setDownloading(result.id);
       setProgress({ loaded: 0, total: null });
+      setCancelling(false);
       setError(null);
+      const controller = new AbortController();
+      abortRef.current = controller;
       try {
-        const file = await downloadYouTubeAudio(result.id, result.title, setProgress);
+        const file = await downloadYouTubeAudio(
+          result.id,
+          result.title,
+          setProgress,
+          controller.signal,
+        );
         console.log('[YouTubeSearch] Download complete, file:', file.name, file.size, file.type);
         onSelect(file, { title: result.title, artist: result.channel });
       } catch (cause) {
-        console.error('[YouTubeSearch] Download error:', cause);
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (controller.signal.aborted) {
+          console.log('[YouTubeSearch] Download cancelled');
+        } else {
+          console.error('[YouTubeSearch] Download error:', cause);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
       } finally {
+        abortRef.current = null;
         setDownloading(null);
         setProgress(null);
+        setCancelling(false);
       }
     },
     [downloading, onSelect],
   );
+
+  const cancelDownload = useCallback(() => {
+    if (!abortRef.current) return;
+    setCancelling(true);
+    abortRef.current.abort();
+  }, []);
 
   const submit = useCallback(
     async (event: FormEvent) => {
@@ -166,7 +188,19 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
         <div className="yt-progress" role="status" aria-live="polite">
           <div className="yt-progress-head">
             <span className="yt-note">Baixando o audio selecionado...</span>
-            <span className="yt-note yt-progress-pct">{percent !== null ? `${percent}%` : "..."}</span>
+            <span className="yt-progress-actions">
+              <span className="yt-note yt-progress-pct">
+                {percent !== null ? `${percent}%` : "..."}
+              </span>
+              <button
+                type="button"
+                className="btn yt-cancel"
+                onClick={cancelDownload}
+                disabled={cancelling}
+              >
+                {cancelling ? "Cancelando..." : "Cancelar"}
+              </button>
+            </span>
           </div>
           <div className="yt-bar">
             <span
