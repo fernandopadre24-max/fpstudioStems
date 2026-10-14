@@ -88,6 +88,9 @@ function describeCookieValue(): string {
     const viaBase64 = !raw.includes("\t");
     return `cookies:sim (${resolved.length} bytes${viaBase64 ? ", base64" : ""})`;
   }
+  if (/(Base64String|ReadAllBytes|IO\.File|Set-Clipboard|Convert\])/.test(raw)) {
+    return "cookies:valor invalido (voce colou o COMANDO; rode-o e cole a SAIDA: o texto longo que aparece no PowerShell)";
+  }
   let kind = "texto";
   if (/^\s*[[{]/.test(raw)) kind = "json";
   else if (/^\s*</.test(raw)) kind = "html";
