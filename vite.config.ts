@@ -12,6 +12,6 @@ const isolationHeaders = {
 export default defineConfig({
   plugins: [react(), youtubeApiPlugin(), lyricsApiPlugin(), chordsApiPlugin()],
   optimizeDeps: { exclude: ["onnxruntime-web"] },
-  server: { headers: isolationHeaders },
-  preview: { headers: isolationHeaders },
+  server: { headers: isolationHeaders, allowedHosts: [".trycloudflare.com"] },
+  preview: { headers: isolationHeaders, allowedHosts: [".trycloudflare.com"] },
 });
