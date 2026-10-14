@@ -132,7 +132,7 @@ function collectOutput(executable: string, args: string[]): Promise<string> {
   });
 }
 
-export async function searchYouTube(query: string, limit = 20): Promise<YouTubeResult[]> {
+async function searchYtDlp(query: string, limit = 20): Promise<YouTubeResult[]> {
   const executable = await ensureYtDlp();
   const output = await collectOutput(executable, [
     `ytsearch${limit}:${query}`,
@@ -160,6 +160,45 @@ export async function searchYouTube(query: string, limit = 20): Promise<YouTubeR
       viewCount: typeof entry.view_count === "number" ? entry.view_count : null,
       thumbnail: entry.thumbnails?.[0]?.url ?? `https://i.ytimg.com/vi/${entry.id}/mqdefault.jpg`,
     }));
+}
+
+interface InvidiousSearchItem {
+  videoId?: string;
+  title?: string;
+  author?: string;
+  lengthSeconds?: number;
+  viewCount?: number;
+  videoThumbnails?: { url?: string }[];
+}
+
+// Busca via API JSON do Invidious: instantanea (sem baixar o yt-dlp) e resolve
+// o desafio Anubis quando a instancia exige verificacao.
+async function searchInvidious(query: string, limit: number): Promise<YouTubeResult[]> {
+  const path = `/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
+  try {
+    const data = await invidiousJson<InvidiousSearchItem[]>(path);
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter((item) => /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId ?? ""))
+      .slice(0, limit)
+      .map((item) => ({
+        id: item.videoId as string,
+        title: item.title ?? "",
+        channel: item.author ?? "",
+        duration: typeof item.lengthSeconds === "number" ? item.lengthSeconds : null,
+        viewCount: typeof item.viewCount === "number" ? item.viewCount : null,
+        thumbnail:
+          item.videoThumbnails?.[0]?.url ?? `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function searchYouTube(query: string, limit = 20): Promise<YouTubeResult[]> {
+  const viaInvidious = await searchInvidious(query, limit);
+  if (viaInvidious.length > 0) return viaInvidious;
+  return searchYtDlp(query, limit);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +276,40 @@ async function solveAnubis(pageUrl: string): Promise<string | null> {
     .filter((pair) => !/Max-Age=0/i.test(pair))
     .join("; ");
   return auth || null;
+}
+
+// GET JSON de uma rota da instancia Invidious, resolvendo o desafio Anubis
+// quando a resposta volta como HTML e revalidando o cookie se for recusado.
+async function invidiousJson<T>(pathAndQuery: string): Promise<T | null> {
+  const url = `${INVIDIOUS_BASE}${pathAndQuery}`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const headers: Record<string, string> = {
+      "User-Agent": CHROME_UA,
+      Accept: "application/json",
+    };
+    if (anubisCookie) headers.Cookie = anubisCookie;
+    const response = await fetch(url, {
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (response.status === 200) {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (contentType.includes("text/html")) {
+        await response.text();
+        anubisCookie = await solveAnubis(url);
+        if (anubisCookie) continue;
+        return null;
+      }
+      return (await response.json()) as T;
+    }
+    if ((response.status === 401 || response.status === 403) && anubisCookie) {
+      anubisCookie = null;
+      continue;
+    }
+    return null;
+  }
+  return null;
 }
 
 async function openInvidiousAudio(id: string): Promise<Response> {
@@ -329,9 +402,9 @@ export async function streamYouTubeAudio(
   id: string,
   response: ServerResponse,
 ): Promise<void> {
-  const streamed = await streamYtDlpAudio(id, response);
-  if (streamed) return;
+  // Invidious primeiro: evita o download do yt-dlp no cold start.
   if (await streamInvidiousAudio(id, response)) return;
+  if (await streamYtDlpAudio(id, response)) return;
   if (await streamInvidiousAudio(id, response)) return;
   sendJson(response, 502, {
     error:
@@ -412,10 +485,9 @@ export async function handleYouTubeApi(
 
   try {
     if (route === "status") {
-      if (requestUrl.searchParams.get("prepare") === "1") {
-        ensureYtDlp().catch(() => undefined);
-      }
-      sendJson(response, 200, getYtDlpState());
+      // A busca agora usa a API do Invidious (instantanea), entao nao ha nada
+      // para preparar: o yt-dlp so e baixado sob demanda se o Invidious falhar.
+      sendJson(response, 200, { status: "ready", error: null });
       return;
     }
 

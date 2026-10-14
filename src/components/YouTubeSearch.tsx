@@ -133,18 +133,13 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
         </button>
       </form>
 
-      {engine === "loading" && (
-        <p className="yt-note">Preparando o buscador (baixando o yt-dlp na primeira vez)...</p>
-      )}
+      {engine === "loading" && <p className="yt-note">Preparando o buscador...</p>}
       {engine === "error" && (
-        <p className="yt-note yt-note-error">
-          Nao foi possivel preparar o yt-dlp: {engineError}
-        </p>
+        <p className="yt-note yt-note-error">Nao foi possivel preparar o buscador: {engineError}</p>
       )}
       {engine === "ready" && !results && !searching && (
         <p className="yt-note">
-          O audio e baixado apenas para separar os stems; a primeira busca pode
-          demorar alguns segundos enquanto o yt-dlp e preparado.
+          O audio e baixado apenas para separar os stems; a busca e instantanea.
         </p>
       )}
 

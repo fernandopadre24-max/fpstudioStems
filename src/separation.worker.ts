@@ -331,13 +331,13 @@ async function separateWithSession(
       const split = separateDrumsPercussion(outs[index][0], outs[index][1]);
       payloads.push({
         id: "drums",
-        left: split.harmonicLeft.buffer as ArrayBuffer,
-        right: split.harmonicRight.buffer as ArrayBuffer,
+        left: split.percussiveLeft.buffer as ArrayBuffer,
+        right: split.percussiveRight.buffer as ArrayBuffer,
       });
       payloads.push({
         id: "percussion",
-        left: split.percussiveLeft.buffer as ArrayBuffer,
-        right: split.percussiveRight.buffer as ArrayBuffer,
+        left: split.harmonicLeft.buffer as ArrayBuffer,
+        right: split.harmonicRight.buffer as ArrayBuffer,
       });
     } else {
       payloads.push({ id, left: outs[index][0].buffer, right: outs[index][1].buffer });
