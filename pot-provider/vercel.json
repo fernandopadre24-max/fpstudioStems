@@ -1,0 +1,26 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/get_pot",
+      "destination": "/api/get_pot"
+    },
+    {
+      "source": "/invalidate_caches",
+      "destination": "/api/invalidate_caches"
+    },
+    {
+      "source": "/invalidate_it",
+      "destination": "/api/invalidate_it"
+    },
+    {
+      "source": "/ping",
+      "destination": "/api/ping"
+    },
+    {
+      "source": "/minter_cache",
+      "destination": "/api/minter_cache"
+    }
+  ],
+  "trailingSlash": false
+}
