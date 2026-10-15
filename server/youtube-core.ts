@@ -124,6 +124,63 @@ async function cookieArgs(): Promise<string[]> {
   return file ? ["--cookies", file] : [];
 }
 
+// PO Token (bgutil) via provider no Vercel. Sem isso, cookies de login fazem o
+// YouTube servir SABR (so storyboards, sem formatos de audio/video). Com o
+// token, os formatos normais voltam.
+const bgutilUrl =
+  process.env.BGUTIL_URL?.trim().replace(/\/+$/, "") || "https://bgutil-pot.vercel.app";
+const potPluginDir = path.join(binDir, "yt-dlp-plugins");
+const potPluginZip = path.join(potPluginDir, "bgutil-ytdlp-pot-provider.zip");
+const potPluginUrl =
+  "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/latest/download/bgutil-ytdlp-pot-provider.zip";
+let potPreparation: Promise<void> | null = null;
+let potReady = false;
+
+async function preparePotPlugin(): Promise<void> {
+  try {
+    await fs.access(potPluginZip);
+    potReady = true;
+    return;
+  } catch {
+    /* precisa baixar */
+  }
+  try {
+    await fs.mkdir(potPluginDir, { recursive: true });
+    const response = await fetch(potPluginUrl, { redirect: "follow" });
+    if (!response.ok || !response.body) {
+      throw new Error(`Falha ao baixar o plugin POT (HTTP ${response.status}).`);
+    }
+    const temporary = `${potPluginZip}.download`;
+    const body = response.body as unknown as Parameters<typeof Readable.fromWeb>[0];
+    await pipeline(Readable.fromWeb(body), createWriteStream(temporary));
+    await fs.rm(potPluginZip, { force: true }).catch(() => undefined);
+    await fs.rename(temporary, potPluginZip);
+    potReady = true;
+  } catch (cause) {
+    potPreparation = null;
+    throw cause;
+  }
+}
+
+async function potArgs(): Promise<string[]> {
+  if (!bgutilUrl) return [];
+  if (!potReady) {
+    if (!potPreparation) potPreparation = preparePotPlugin();
+    try {
+      await potPreparation;
+    } catch {
+      return [];
+    }
+  }
+  if (!potReady) return [];
+  return [
+    "--plugin-dirs",
+    potPluginDir,
+    "--extractor-args",
+    `youtubepot-bgutilhttp:base_url=${bgutilUrl}`,
+  ];
+}
+
 async function prepareYtDlp(): Promise<string> {
   try {
     await fs.access(binaryPath);
@@ -635,6 +692,7 @@ async function probeYtDlpSize(
 ): Promise<number | null> {
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
   try {
+    const pot = await potArgs();
     const output = await collectOutput(executable, [
       "-f",
       "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
@@ -642,6 +700,7 @@ async function probeYtDlpSize(
       "--print",
       "%(filesize,filesize_approx)s",
       ...clientArgs(playerClient),
+      ...pot,
       ...cookies,
       watchUrl,
     ]);
@@ -670,6 +729,7 @@ async function streamYtDlpAudio(
     return false;
   }
   const cookies = await cookieArgs();
+  const pot = await potArgs();
   const totalSize = await probeYtDlpSize(executable, cookies, id, playerClient);
   return new Promise<boolean>((resolve) => {
     const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
@@ -684,6 +744,7 @@ async function streamYtDlpAudio(
         "--no-warnings",
         "--no-part",
         ...clientArgs(playerClient),
+        ...pot,
         ...cookies,
         watchUrl,
       ],

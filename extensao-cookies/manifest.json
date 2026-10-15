@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Exportar cookies do YouTube (yt-dlp)",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Exporta os cookies do YouTube/Google no formato Netscape (cookies.txt) para uso com o yt-dlp na Vercel.",
-  "permissions": ["cookies"],
+  "permissions": ["cookies", "downloads"],
   "host_permissions": [
     "https://*.youtube.com/*",
     "https://*.google.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_title": "Exportar cookies do YouTube",
     "default_popup": "popup.html"

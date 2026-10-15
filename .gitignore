@@ -20,3 +20,6 @@ Thumbs.db
 .playwright-mcp/
 .testdata/
 .bin/
+.vercel
+.env*
+extensao-cookies/cookies.txt
