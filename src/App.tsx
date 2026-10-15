@@ -71,6 +71,9 @@ interface ModelProgress {
 
 const GPU_BROKEN_KEY = "stemroller.gpuBroken";
 
+const VOCAL_STEM_IDS: StemId[] = ["vocals", "leadVocal", "backingVocal"];
+const isVocalStem = (id: StemId): boolean => VOCAL_STEM_IDS.includes(id);
+
 interface SeparationProgress {
   chunk: number;
   chunks: number;
@@ -105,6 +108,7 @@ export default function App() {
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
   const [modelChoice, setModelChoice] = useState<StemModelId>("htdemucs");
   const [splitPercussion, setSplitPercussion] = useState(false);
+  const [splitVocals, setSplitVocals] = useState(false);
   const [separationNote, setSeparationNote] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<"mixer" | "original" | "instrumental" | null>(
     null,
@@ -168,7 +172,7 @@ export default function App() {
       const left = buffer.getChannelData(0);
       const right = buffer.getChannelData(1);
       for (const stem of stems) {
-        if (stem.id === "vocals") continue;
+        if (isVocalStem(stem.id)) continue;
         for (let i = 0; i < length; i++) {
           left[i] += stem.left[i];
           right[i] += stem.right[i];
@@ -380,8 +384,9 @@ export default function App() {
       backendChoice,
       modelChoice,
       splitPercussion,
+      splitVocals,
     );
-  }, [backendChoice, decoded, modelChoice, splitPercussion]);
+  }, [backendChoice, decoded, modelChoice, splitPercussion, splitVocals]);
 
   const cancelSeparation = useCallback(() => {
     engineRef.current?.cancel();
@@ -501,7 +506,7 @@ export default function App() {
 
   const transcribeVocals = useCallback(async () => {
     if (!results) return;
-    const vocals = results.find((stem) => stem.id === "vocals");
+    const vocals = results.find((stem) => isVocalStem(stem.id));
     if (!vocals) {
       setLyricsError("Nao ha trilha de vocais disponivel para transcrever.");
       return;
@@ -603,7 +608,7 @@ export default function App() {
   );
 
   const vocalOffset = useMemo(() => {
-    const vocals = results?.find((s) => s.id === "vocals");
+    const vocals = results?.find((s) => isVocalStem(s.id));
     if (!vocals) return 0;
     const blockSize = Math.round(SAMPLE_RATE * 0.1);
     const left = vocals.left;
@@ -1147,6 +1152,19 @@ export default function App() {
                   disabled={phase === "separating"}
                 />
                 <span>Separar percussão</span>
+              </label>
+
+              <label
+                className="field-toggle"
+                title="Divide a trilha de vocais em voz principal (lead) e backing/harmonia com o modelo UVR-MDX-NET KARA 2. Requer um download extra (~50 MB) na primeira vez."
+              >
+                <input
+                  type="checkbox"
+                  checked={splitVocals}
+                  onChange={(event) => setSplitVocals(event.target.checked)}
+                  disabled={phase === "separating"}
+                />
+                <span>Separar voz e backing</span>
               </label>
 
               {phase === "separating" ? (

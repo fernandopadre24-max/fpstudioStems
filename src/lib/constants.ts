@@ -6,6 +6,8 @@ export type StemId =
   | "bass"
   | "other"
   | "vocals"
+  | "leadVocal"
+  | "backingVocal"
   | "guitar"
   | "piano";
 
@@ -46,6 +48,18 @@ export const STEMS: StemMeta[] = [
     label: "Vocais",
     description: "Voz principal e harmonias",
     color: "#ffd166",
+  },
+  {
+    id: "leadVocal",
+    label: "Voz principal",
+    description: "Voz principal (lead) isolada",
+    color: "#ffd166",
+  },
+  {
+    id: "backingVocal",
+    label: "Backing vocal",
+    description: "Backing vocals e harmonias",
+    color: "#f4a261",
   },
   {
     id: "guitar",
@@ -102,6 +116,20 @@ export function getModel(id: StemModelId): StemModelMeta {
   if (!model) throw new Error(`Modelo desconhecido: ${id}`);
   return model;
 }
+
+export interface ModelAsset {
+  id: string;
+  url: string;
+  sizeBytes: number;
+}
+
+// Segundo estagio, opcional: divide o stem de vocais em voz principal (lead) e
+// backing/harmonia. UVR-MDX-NET KARA 2 (ONNX, rede pura: STFT/OLA no host).
+export const BACKING_VOCAL_MODEL: ModelAsset = {
+  id: "kara2",
+  url: "https://huggingface.co/musetric/uvr-mdxnet-kara2-onnx/resolve/main/kara2.onnx",
+  sizeBytes: 52832612,
+};
 
 export type Backend = "auto" | "webgpu" | "wasm";
 

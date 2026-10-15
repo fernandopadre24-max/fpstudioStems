@@ -10,6 +10,7 @@ export type WorkerRequest =
       backend: Backend;
       model: StemModelId;
       splitPercussion?: boolean;
+      splitVocals?: boolean;
     }
   | { type: "cancel" };
 

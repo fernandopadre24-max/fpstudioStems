@@ -1,6 +1,14 @@
 import * as ort from "onnxruntime-web";
-import { getModel, SAMPLE_RATE, type Backend, type StemModelMeta } from "./lib/constants";
+import {
+  BACKING_VOCAL_MODEL,
+  getModel,
+  SAMPLE_RATE,
+  type Backend,
+  type ModelAsset,
+  type StemModelMeta,
+} from "./lib/constants";
 import { separateDrumsPercussion } from "./lib/hpss";
+import { KARA_DIM_F, KARA_FRAMES, separateLeadBacking } from "./lib/leadBacking";
 import type { StemResultPayload, WorkerRequest, WorkerResponse } from "./lib/protocol";
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -38,7 +46,7 @@ function toSegmentWindow(index: number, total: number): Float32Array {
   return window;
 }
 
-async function isModelCached(model: StemModelMeta): Promise<boolean> {
+async function isModelCached(model: ModelAsset): Promise<boolean> {
   if (modelBlobs.has(model.url)) return true;
   if (typeof caches === "undefined") return false;
   try {
@@ -54,7 +62,7 @@ async function isModelCached(model: StemModelMeta): Promise<boolean> {
   return false;
 }
 
-async function downloadModel(model: StemModelMeta): Promise<Blob> {
+async function downloadModel(model: ModelAsset): Promise<Blob> {
   const existing = modelBlobs.get(model.url);
   if (existing) return existing;
 
@@ -118,10 +126,10 @@ function applyPrefs(blockWebgpu: boolean) {
   webgpuAdapter = null;
 }
 
-async function getSession(model: StemModelMeta, backend: Backend): Promise<SessionHandle> {
+async function getSession(model: ModelAsset, backend: Backend, announce = true): Promise<SessionHandle> {
   const requestedGpu = backend === "webgpu";
   const preferred: "webgpu" | "wasm" =
-    requestedGpu && (await hasWebgpuAdapter()) ? "webgpu" : "wasm";
+    requestedGpu && (await hasWebgpuAdapter()) && webgpuUsable ? "webgpu" : "wasm";
 
   const cached = sessions.get(`${model.id}:${preferred}`);
   if (cached) return { session: cached, backend: preferred };
@@ -138,16 +146,18 @@ async function getSession(model: StemModelMeta, backend: Backend): Promise<Sessi
         SESSION_CREATE_TIMEOUT_MS,
       );
       sessions.set(`${model.id}:webgpu`, session);
-      post({ type: "session", backend: "webgpu", fellBack: false });
+      if (announce) post({ type: "session", backend: "webgpu", fellBack: false });
       return { session, backend: "webgpu" };
     } catch (error) {
-      post({
-        type: "session",
-        backend: "wasm",
-        fellBack: true,
-        gpuBroken: true,
-        reason: describeError(error),
-      });
+      if (announce) {
+        post({
+          type: "session",
+          backend: "wasm",
+          fellBack: true,
+          gpuBroken: true,
+          reason: describeError(error),
+        });
+      }
     }
   }
 
@@ -156,7 +166,7 @@ async function getSession(model: StemModelMeta, backend: Backend): Promise<Sessi
 
   const session = await createSession(bytes, ["wasm"], `${model.id}:wasm`);
   sessions.set(`${model.id}:wasm`, session);
-  if (preferred !== "webgpu") {
+  if (announce && preferred !== "webgpu") {
     post({
       type: "session",
       backend: "wasm",
@@ -291,6 +301,7 @@ async function separate(
   backend: Backend,
   model: StemModelMeta,
   splitPercussion: boolean,
+  splitVocals: boolean,
 ): Promise<void> {
   cancelled = false;
   if (backend === "webgpu") webgpuUsable = true;
@@ -299,7 +310,7 @@ async function separate(
   try {
     const handle = await getSession(model, backend);
     used = handle.backend;
-    await separateWithSession(handle.session, left, right, model, splitPercussion);
+    await separateWithSession(handle.session, left, right, model, splitPercussion, splitVocals, used);
   } catch (error) {
     if (cancelled) {
       post({ type: "cancelled" });
@@ -316,8 +327,30 @@ async function separate(
       reason: describeError(error),
     });
     const handle = await getSession(model, "wasm");
-    await separateWithSession(handle.session, left, right, model, splitPercussion);
+    await separateWithSession(
+      handle.session,
+      left,
+      right,
+      model,
+      splitPercussion,
+      splitVocals,
+      "wasm",
+    );
   }
+}
+
+// Rede pura do KARA 2: recebe o espectro [1,4,2048,256] de um bloco e devolve o
+// espectro do backing (tudo menos a voz principal).
+async function runKaraChunk(
+  session: ort.InferenceSession,
+  spectrum: Float32Array,
+): Promise<Float32Array> {
+  const input = new ort.Tensor("float32", spectrum, [1, 4, KARA_DIM_F, KARA_FRAMES]);
+  const feeds: Record<string, ort.Tensor> = {};
+  feeds[session.inputNames[0] ?? "input"] = input;
+  const result = await session.run(feeds);
+  const name = session.outputNames[0] ?? "output";
+  return result[name].data as Float32Array;
 }
 
 async function separateWithSession(
@@ -326,6 +359,8 @@ async function separateWithSession(
   right: Float32Array,
   model: StemModelMeta,
   splitPercussion: boolean,
+  splitVocals: boolean,
+  backend: "webgpu" | "wasm",
 ): Promise<void> {
   const startedAt = performance.now();
 
@@ -399,6 +434,51 @@ async function separateWithSession(
         left: split.harmonicLeft.buffer as ArrayBuffer,
         right: split.harmonicRight.buffer as ArrayBuffer,
       });
+    } else if (splitVocals && id === "vocals") {
+      post({
+        type: "separation-note",
+        message: "Separando voz principal do backing (modelo extra)...",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      let karaSession: ort.InferenceSession | null = null;
+      try {
+        karaSession = (await getSession(BACKING_VOCAL_MODEL, backend, false)).session;
+      } catch (error) {
+        post({
+          type: "separation-note",
+          message: `Nao foi possivel carregar o modelo de voz/backing: ${describeError(error)}`,
+        });
+      }
+      const active = karaSession;
+      if (active) {
+        const split = await separateLeadBacking(
+          outs[index][0],
+          outs[index][1],
+          (spectrum) => runKaraChunk(active, spectrum),
+          (done, totalChunks) =>
+            post({
+              type: "separation-note",
+              message: `Separando voz e backing... bloco ${done} de ${totalChunks}`,
+            }),
+          () => cancelled,
+        );
+        if (cancelled) {
+          post({ type: "cancelled" });
+          return;
+        }
+        payloads.push({
+          id: "leadVocal",
+          left: split.leadLeft.buffer as ArrayBuffer,
+          right: split.leadRight.buffer as ArrayBuffer,
+        });
+        payloads.push({
+          id: "backingVocal",
+          left: split.backingLeft.buffer as ArrayBuffer,
+          right: split.backingRight.buffer as ArrayBuffer,
+        });
+      } else {
+        payloads.push({ id, left: outs[index][0].buffer, right: outs[index][1].buffer });
+      }
     } else {
       payloads.push({ id, left: outs[index][0].buffer, right: outs[index][1].buffer });
     }
@@ -440,6 +520,7 @@ ctx.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         message.backend,
         getModel(message.model),
         message.splitPercussion ?? false,
+        message.splitVocals ?? false,
       );
     }
   } catch (error) {

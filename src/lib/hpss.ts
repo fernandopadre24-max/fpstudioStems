@@ -2,8 +2,17 @@ import { fft } from "./analysis-core.ts";
 
 const FFT_SIZE = 2048;
 const HOP = FFT_SIZE >> 1;
-const RADIUS = 8;
-const WINDOW = RADIUS * 2 + 1;
+// Medianas de tamanhos distintos para cada componente (HPSS classico):
+// a harmonicidade e estimada ao longo do TEMPO (notas sustentadas) e a
+// percussividade ao longo da FREQUENCIA (transientes de banda larga).
+const TIME_RADIUS = 8; // 17 quadros (~395 ms a 44.1 kHz / hop 1024)
+const FREQ_RADIUS = 11; // 23 bins (~495 Hz)
+const TIME_WINDOW = TIME_RADIUS * 2 + 1;
+// Expoente do mascaramento estilo Wiener e margem de residuo (corta o
+// vazamento entre as duas trilhas, reduzindo "borrao" e ruido musical).
+const POWER = 2;
+const MARGIN = 0.12;
+const MASK_SMOOTH = 0.25;
 
 function hann(size: number): Float32Array {
   const window = new Float32Array(size);
@@ -29,7 +38,7 @@ interface Split {
 
 function hpssChannel(signal: Float32Array): Split {
   const half = FFT_SIZE >> 1;
-  const pad = (WINDOW + RADIUS) * HOP;
+  const pad = (TIME_WINDOW + TIME_RADIUS) * HOP;
   const padded = new Float32Array(signal.length + pad * 2);
   padded.set(signal, pad);
   const numFrames = Math.max(1, Math.floor((padded.length - FFT_SIZE) / HOP) + 1);
@@ -42,21 +51,23 @@ function hpssChannel(signal: Float32Array): Split {
   const ringRe: Float32Array[] = [];
   const ringIm: Float32Array[] = [];
   const ringMag: Float32Array[] = [];
-  for (let i = 0; i < WINDOW; i++) {
+  for (let i = 0; i < TIME_WINDOW; i++) {
     ringRe.push(new Float32Array(FFT_SIZE));
     ringIm.push(new Float32Array(FFT_SIZE));
     ringMag.push(new Float32Array(half + 1));
   }
 
-  const timeScratch = new Float32Array(WINDOW);
-  const freqScratch = new Float32Array(WINDOW);
+  const timeScratch = new Float32Array(TIME_WINDOW);
+  const freqScratch = new Float32Array(FREQ_RADIUS * 2 + 1);
   const reH = new Float32Array(FFT_SIZE);
   const imH = new Float32Array(FFT_SIZE);
   const reP = new Float32Array(FFT_SIZE);
   const imP = new Float32Array(FFT_SIZE);
+  const maskH = new Float32Array(half + 1);
+  const maskP = new Float32Array(half + 1);
 
   for (let f = 0; f < numFrames; f++) {
-    const slot = f % WINDOW;
+    const slot = f % TIME_WINDOW;
     const re = ringRe[slot];
     const im = ringIm[slot];
     const mag = ringMag[slot];
@@ -68,36 +79,64 @@ function hpssChannel(signal: Float32Array): Split {
     fft(re, im);
     for (let k = 0; k <= half; k++) mag[k] = Math.hypot(re[k], im[k]);
 
-    if (f < WINDOW - 1) continue;
+    if (f < TIME_WINDOW - 1) continue;
 
-    const center = f - RADIUS;
-    const centerSlot = center % WINDOW;
+    const center = f - TIME_RADIUS;
+    const centerSlot = center % TIME_WINDOW;
     const cRe = ringRe[centerSlot];
     const cIm = ringIm[centerSlot];
     const cMag = ringMag[centerSlot];
 
     for (let k = 0; k <= half; k++) {
-      for (let j = 0; j < WINDOW; j++) timeScratch[j] = ringMag[j][k];
+      // Harmonicidade: mediana ao longo do tempo neste bin de frequencia.
+      for (let j = 0; j < TIME_WINDOW; j++) timeScratch[j] = ringMag[j][k];
       timeScratch.sort();
-      const harmonic = timeScratch[RADIUS];
+      const harmonic = timeScratch[TIME_RADIUS];
 
+      // Percussividade: mediana ao longo da frequencia neste quadro.
       let count = 0;
-      const from = Math.max(0, k - RADIUS);
-      const to = Math.min(half, k + RADIUS);
+      const from = Math.max(0, k - FREQ_RADIUS);
+      const to = Math.min(half, k + FREQ_RADIUS);
       for (let j = from; j <= to; j++) freqScratch[count++] = cMag[j];
       freqScratch.subarray(0, count).sort();
       const percussive = freqScratch[count >> 1];
 
-      const h2 = harmonic * harmonic;
-      const p2 = percussive * percussive;
+      const h2 = Math.pow(harmonic, POWER);
+      const p2 = Math.pow(percussive, POWER);
       const denom = h2 + p2;
-      const maskH = denom > 1e-12 ? h2 / denom : 0.5;
-      const maskP = 1 - maskH;
+      let mh = denom > 1e-12 ? h2 / denom : 0.5;
+      let mp = 1 - mh;
 
-      reH[k] = cRe[k] * maskH;
-      imH[k] = cIm[k] * maskH;
-      reP[k] = cRe[k] * maskP;
-      imP[k] = cIm[k] * maskP;
+      // Margem: zera o residuo pequeno de cada lado e renormaliza a soma.
+      mh = mh > MARGIN ? (mh - MARGIN) / (1 - MARGIN) : 0;
+      mp = mp > MARGIN ? (mp - MARGIN) / (1 - MARGIN) : 0;
+      const sum = mh + mp;
+      if (sum > 1e-8) {
+        mh /= sum;
+        mp /= sum;
+      } else {
+        mh = 0.5;
+        mp = 0.5;
+      }
+      maskH[k] = mh;
+      maskP[k] = mp;
+    }
+
+    // Suavizacao leve ao longo da frequencia: reduz "ruido musical" (bins
+    // isolados ligando/desligando) sem borrar as bordas dos transientes.
+    for (let k = 0; k <= half; k++) {
+      const leftH = maskH[k > 0 ? k - 1 : 0];
+      const rightH = maskH[k < half ? k + 1 : half];
+      const leftP = maskP[k > 0 ? k - 1 : 0];
+      const rightP = maskP[k < half ? k + 1 : half];
+      const smH = (1 - MASK_SMOOTH) * maskH[k] + MASK_SMOOTH * 0.5 * (leftH + rightH);
+      const smP = (1 - MASK_SMOOTH) * maskP[k] + MASK_SMOOTH * 0.5 * (leftP + rightP);
+      const s = smH + smP;
+      const nh = s > 1e-8 ? smH / s : 0.5;
+      reH[k] = cRe[k] * nh;
+      imH[k] = cIm[k] * nh;
+      reP[k] = cRe[k] * (1 - nh);
+      imP[k] = cIm[k] * (1 - nh);
     }
 
     for (let k = 1; k < half; k++) {

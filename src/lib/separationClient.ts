@@ -50,8 +50,9 @@ export class SeparationEngine {
     backend: Backend,
     model: StemModelId,
     splitPercussion = false,
+    splitVocals = false,
   ) {
-    this.send({ type: "separate", left, right, backend, model, splitPercussion });
+    this.send({ type: "separate", left, right, backend, model, splitPercussion, splitVocals });
   }
 
   cancel() {
