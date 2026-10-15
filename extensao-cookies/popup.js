@@ -17,13 +17,42 @@ function toNetscape(cookies) {
   return lines.join("\n") + "\n";
 }
 
-document.getElementById("go").addEventListener("click", async () => {
+document.getElementById("go").addEventListener("click", runExport);
+window.addEventListener("DOMContentLoaded", () => {
+  if (window.location.search.includes("auto=1")) runExport();
+});
+
+const BASE_URLS = [
+  "https://www.youtube.com/",
+  "https://youtube.com/",
+  "https://m.youtube.com/",
+  "https://www.google.com/",
+  "https://google.com/",
+  "https://accounts.google.com/",
+  "https://ogs.google.com/",
+];
+
+async function collect() {
+  const map = new Map();
+  for (const url of BASE_URLS) {
+    try {
+      for (const c of await chrome.cookies.getAll({ url })) {
+        map.set(`${c.domain}|${c.path}|${c.name}`, c);
+      }
+    } catch (_) {}
+  }
+  try {
+    for (const c of await chrome.cookies.getAll({})) map.set(`${c.domain}|${c.path}|${c.name}`, c);
+  } catch (_) {}
+  return [...map.values()].filter(
+    (c) => /(^|\.)youtube\.com$/.test(c.domain) || /(^|\.)google\.com$/.test(c.domain),
+  );
+}
+
+async function runExport() {
   try {
     setStatus("Lendo cookies...");
-    const all = await chrome.cookies.getAll({});
-    const cookies = all.filter(
-      (c) => /(^|\.)youtube\.com$/.test(c.domain) || /(^|\.)google\.com$/.test(c.domain),
-    );
+    const cookies = await collect();
     if (cookies.length === 0) {
       setStatus(
         "Nenhum cookie do YouTube/Google encontrado. Abra o youtube.com logado e tente de novo.",
@@ -52,4 +81,4 @@ document.getElementById("go").addEventListener("click", async () => {
   } catch (e) {
     setStatus("Erro: " + (e && e.message ? e.message : String(e)), "err");
   }
-});
+}

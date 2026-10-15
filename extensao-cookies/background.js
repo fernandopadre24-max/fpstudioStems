@@ -17,11 +17,44 @@ function toNetscape(cookies) {
   return lines.join("\n") + "\n";
 }
 
+const BASE_URLS = [
+  "https://www.youtube.com/",
+  "https://youtube.com/",
+  "https://m.youtube.com/",
+  "https://www.google.com/",
+  "https://google.com/",
+  "https://accounts.google.com/",
+  "https://ogs.google.com/",
+];
+
 async function collect() {
-  const all = await chrome.cookies.getAll({});
-  return all.filter(
+  const map = new Map();
+  for (const url of BASE_URLS) {
+    try {
+      for (const c of await chrome.cookies.getAll({ url })) {
+        map.set(`${c.domain}|${c.path}|${c.name}`, c);
+      }
+    } catch (_) {}
+  }
+  try {
+    for (const c of await chrome.cookies.getAll({})) map.set(`${c.domain}|${c.path}|${c.name}`, c);
+  } catch (_) {}
+  return [...map.values()].filter(
     (c) => /(^|\.)youtube\.com$/.test(c.domain) || /(^|\.)google\.com$/.test(c.domain),
   );
+}
+
+async function ensureOffscreen() {
+  try {
+    if (chrome.offscreen.hasDocument && (await chrome.offscreen.hasDocument())) return;
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["BLOBS"],
+      justification: "Gerar o arquivo cookies.txt a partir dos cookies lidos.",
+    });
+  } catch (e) {
+    console.warn("[cookies] offscreen:", e && e.message);
+  }
 }
 
 async function exportCookies(reason) {
@@ -33,14 +66,13 @@ async function exportCookies(reason) {
       return;
     }
     const text = toNetscape(cookies);
-    const b64 = btoa(unescape(encodeURIComponent(text)));
-    await chrome.downloads.download({
-      url: "data:text/plain;base64," + b64,
-      filename: "cookies.txt",
-      saveAs: false,
-      conflictAction: "overwrite",
-    });
-    console.log(`[cookies] exportados ${cookies.length} cookies (${auth.length} de login) - motivo: ${reason}`);
+    await ensureOffscreen();
+    await chrome.runtime.sendMessage({ type: "download-cookies", text });
+    console.log(
+      `[cookies] exportados ${cookies.length} cookies (${auth.length} de login: ${auth
+        .map((c) => c.name)
+        .join(",")}) - motivo: ${reason}`,
+    );
   } catch (e) {
     console.error("[cookies] falha ao exportar:", e);
   }
@@ -48,3 +80,9 @@ async function exportCookies(reason) {
 
 chrome.runtime.onInstalled.addListener(() => exportCookies("onInstalled"));
 chrome.runtime.onStartup.addListener(() => exportCookies("onStartup"));
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === "export-now") {
+    exportCookies("manual").then(() => sendResponse({ ok: true }));
+    return true;
+  }
+});

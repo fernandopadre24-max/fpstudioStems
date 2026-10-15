@@ -644,6 +644,7 @@ async function streamInvidiousAudio(
       "Content-Type",
       audioResponse.headers.get("content-type")?.split(";")[0] ?? "audio/mp4",
     );
+    response.setHeader("X-Stem-Source", "invidious");
     response.setHeader("Cache-Control", "no-store");
     const length = audioResponse.headers.get("content-length");
     if (length) response.setHeader("Content-Length", length);
@@ -699,6 +700,7 @@ async function probeYtDlpSize(
       "--no-warnings",
       "--print",
       "%(filesize,filesize_approx)s",
+      ...runtimeArgs(),
       ...clientArgs(playerClient),
       ...pot,
       ...cookies,
@@ -711,8 +713,22 @@ async function probeYtDlpSize(
   }
 }
 
+// Clientes do YouTube que ainda entregam URLs de formato diretas. Os demais
+// (web, visionos, ios, android_vr...) caem em SABR: vêm formatos sem URL.
+const defaultPlayerClients = "mweb,tv_embedded,tv,web_safari";
+
 function clientArgs(playerClient?: string): string[] {
-  return playerClient ? ["--extractor-args", `youtube:player_client=${playerClient}`] : [];
+  const client = playerClient?.trim() || (process.env.VERCEL ? defaultPlayerClients : "");
+  return client ? ["--extractor-args", `youtube:player_client=${client}`] : [];
+}
+
+// O YouTube passou a exigir um runtime JS para o desafio (EJS). No Vercel
+// usamos o proprio Node da funcao; e imprimimos TLS de navegador, que ajuda a
+// reduzir o bloqueio em IP de datacenter.
+function runtimeArgs(): string[] {
+  return process.env.VERCEL
+    ? ["--js-runtimes", `node:${process.execPath}`, "--impersonate", "chrome"]
+    : [];
 }
 
 async function streamYtDlpAudio(
@@ -743,6 +759,7 @@ async function streamYtDlpAudio(
         "--no-playlist",
         "--no-warnings",
         "--no-part",
+        ...runtimeArgs(),
         ...clientArgs(playerClient),
         ...pot,
         ...cookies,
@@ -760,6 +777,7 @@ async function streamYtDlpAudio(
         started = true;
         response.statusCode = 200;
         response.setHeader("Content-Type", contentType);
+        response.setHeader("X-Stem-Source", "yt-dlp");
         response.setHeader("Cache-Control", "no-store");
         if (totalSize) response.setHeader("Content-Length", String(totalSize));
       }
