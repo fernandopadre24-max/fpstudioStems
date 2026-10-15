@@ -3,6 +3,7 @@ import { PlayerCard } from "./components/Cards";
 import { CifraSheet } from "./components/CifraSheet";
 import { DropZone } from "./components/DropZone";
 import { Editor, type Selection } from "./components/Editor";
+import { SupportCard } from "./components/SupportCard";
 import { YouTubeSearch } from "./components/YouTubeSearch";
 import { useMixer, type MixerTrack } from "./hooks/useMixer";
 import {
@@ -123,6 +124,7 @@ export default function App() {
   const [whisperProgress, setWhisperProgress] = useState<TranscribeProgress | null>(null);
   const [whisperState, setWhisperState] = useState<"download" | "running" | null>(null);
   const [showHarmony, setShowHarmony] = useState(false);
+  const [showSupport, setShowSupport] = useState(false);
   const [chords, setChords] = useState<ChordSegment[] | null>(null);
   const [chordsLoading, setChordsLoading] = useState(false);
   const [cifra, setCifra] = useState<CifraResult | null>(null);
@@ -762,6 +764,18 @@ export default function App() {
           >
             {theme === "dark" ? "☀️ Claro" : "🌙 Escuro"}
           </button>
+          <button
+            type="button"
+            className="chip support-toggle"
+            onClick={() => setShowSupport(true)}
+            title="Apoie o projeto (PIX)"
+            aria-label="Apoie o projeto"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 21s-7.5-4.6-10-9.3C.4 8.3 2 5 5.4 5c2 0 3.3 1.1 4.1 2.3l.5.8.5-.8C11.3 6.1 12.6 5 14.6 5 18 5 19.6 8.3 22 11.7 19.5 16.4 12 21 12 21z" />
+            </svg>
+            Apoiar
+          </button>
         </div>
       </header>
 
@@ -1300,6 +1314,8 @@ export default function App() {
       <footer className="footer">
         <p>Fernando Sena Desenvolvimento em Geral - FPStudio Gravaçoes.</p>
       </footer>
+
+      {showSupport && <SupportCard onClose={() => setShowSupport(false)} />}
     </div>
   );
 }
