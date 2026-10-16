@@ -671,6 +671,7 @@ export async function streamYouTubeAudio(
   const errors: string[] = [];
   const hasCookies = Boolean(await ensureCookies());
   errors.push(cookieStatus());
+  errors.push(proxyStatus());
   // Local (sem VERCEL): o IP nao e datacenter, entao o yt-dlp funciona direto.
   // No Vercel, sem cookies o yt-dlp e bloqueado -> Invidious primeiro.
   const preferYtDlp = hasCookies || !process.env.VERCEL || Boolean(playerClient);
@@ -709,6 +710,7 @@ async function probeYtDlpSize(
       ...runtimeArgs(),
       ...clientArgs(playerClient),
       ...pot,
+      ...proxyArgs(),
       ...cookies,
       watchUrl,
     ]);
@@ -735,6 +737,19 @@ function runtimeArgs(): string[] {
   return process.env.VERCEL
     ? ["--js-runtimes", `node:${process.execPath}`, "--impersonate", "chrome"]
     : [];
+}
+
+// Proxy opcional (residencial) para o yt-dlp. Configure YTDLP_PROXY no Vercel
+// (ex.: http://usuario:senha@host:porta). Resolve o bloqueio de IP de datacenter
+// sem depender de cookies, servindo TODOS os usuarios do link publico.
+const ytProxy = process.env.YTDLP_PROXY?.trim() || "";
+
+function proxyArgs(): string[] {
+  return ytProxy ? ["--proxy", ytProxy] : [];
+}
+
+function proxyStatus(): string {
+  return ytProxy ? "proxy:sim" : "proxy:nao";
 }
 
 async function streamYtDlpAudio(
@@ -768,6 +783,7 @@ async function streamYtDlpAudio(
         ...runtimeArgs(),
         ...clientArgs(playerClient),
         ...pot,
+        ...proxyArgs(),
         ...cookies,
         watchUrl,
       ],
