@@ -602,26 +602,28 @@ async function tryInvidiousInstance(
   base: string,
   id: string,
   local: boolean,
-): Promise<Response | null> {
+): Promise<{ response: Response | null; note: string }> {
   const data = await invidiousJson<InvidiousVideo>(
     base,
     `/api/v1/videos/${encodeURIComponent(id)}?local=${local ? "true" : "false"}`,
   );
-  const audioUrl = data ? pickInvidiousAudio(data) : null;
-  if (!audioUrl) return null;
+  if (!data) return { response: null, note: "api-sem-resposta" };
+  const audioUrl = pickInvidiousAudio(data);
+  if (!audioUrl) return { response: null, note: "sem-formato-audio" };
 
   // Com local=false a URL deve ser proxiada pela instancia; com local=true
   // aponta direto para o googlevideo. Verificamos se o proxy e real antes de tentar.
   if (!local && !isProxiedUrl(base, audioUrl)) {
     // Instancia nao esta proxiando — ignora e deixa cair no local=true
-    return null;
+    return { response: null, note: "nao-proxiado" };
   }
 
-  return fetchInvidiousStream(base, audioUrl);
+  const stream = await fetchInvidiousStream(base, audioUrl);
+  return stream ? { response: stream, note: "ok" } : { response: null, note: "stream-falhou" };
 }
 
 async function openInvidiousAudio(id: string): Promise<Response> {
-  let lastError = "Invidious indisponivel.";
+  const failures: string[] = [];
   const all = await getInvidiousInstanceList();
   // So tentamos as primeiras (conhecidas) para nao estourar o tempo da funcao.
   const instances = all.slice(0, 12);
@@ -631,31 +633,32 @@ async function openInvidiousAudio(id: string): Promise<Response> {
   for (let pass = 0; pass < 2; pass += 1) {
     for (const base of instances) {
       if (Date.now() > deadline) break;
+      const host = base.replace(/^https?:\/\//, "");
       try {
         // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
         const proxied = await tryInvidiousInstance(base, id, false);
-        if (proxied) {
+        if (proxied.response) {
           lastGoodInstance = base;
-          return proxied;
+          return proxied.response;
         }
 
         // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
         const direct = await tryInvidiousInstance(base, id, true);
-        if (direct) {
+        if (direct.response) {
           lastGoodInstance = base;
-          return direct;
+          return direct.response;
         }
 
-        lastError = `${base}: audio bloqueado`;
+        failures.push(`${host}:${proxied.note}/${direct.note}`);
       } catch (cause) {
-        lastError = `${base}: ${cause instanceof Error ? cause.message : String(cause)}`;
+        failures.push(`${host}:${cause instanceof Error ? cause.message.slice(0, 40) : "erro"}`);
       }
     }
     if (pass === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   }
-  throw new Error(lastError);
+  throw new Error(`invidious[${failures.slice(0, 10).join(" ")}]`);
 }
 
 async function streamInvidiousAudio(
