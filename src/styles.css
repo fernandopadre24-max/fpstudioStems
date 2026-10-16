@@ -1991,5 +1991,65 @@ body {
   background: rgba(0, 0, 0, 0.04);
 }
 
+/* ---- Partitura ---- */
+
+.score-panel .controls-row {
+  align-items: flex-end;
+}
+
+.score-result {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  padding: 14px 16px 8px;
+  overflow-x: auto;
+}
+
+.score-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.score-meta b {
+  color: var(--text);
+}
+
+.score-view {
+  width: 100%;
+  min-width: 300px;
+}
+
+.score-view svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.score-error {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 92, 114, 0.4);
+  background: rgba(255, 92, 114, 0.1);
+  color: #ffd0d7;
+  font-size: 14px;
+}
+
+[data-theme="light"] .score-result {
+  background: #ffffff;
+}
+
+[data-theme="light"] .score-error {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.07);
+  color: #b91c1c;
+}
+
+
 
 

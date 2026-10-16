@@ -1,7 +1,8 @@
 import { analyzeAudio, analyzeChords } from "./lib/analysis-core";
+import { extractMelody } from "./lib/melody-core";
 
 interface AnalyzeRequest {
-  mode?: "analysis" | "chords";
+  mode?: "analysis" | "chords" | "melody";
   left: Float32Array;
   right: Float32Array;
   sampleRate: number;
@@ -13,6 +14,8 @@ self.onmessage = (event: MessageEvent<AnalyzeRequest>) => {
   const result =
     mode === "chords"
       ? analyzeChords(left, right, sampleRate, key)
-      : analyzeAudio(left, right, sampleRate);
+      : mode === "melody"
+        ? extractMelody(left, right, sampleRate)
+        : analyzeAudio(left, right, sampleRate);
   (self as unknown as Worker).postMessage(result);
 };

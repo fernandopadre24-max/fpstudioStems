@@ -1,10 +1,12 @@
 import { SAMPLE_RATE } from "./constants";
 import type { ChordSegment, TrackAnalysis } from "./analysis-core";
+import type { MelodyResult } from "./melody-core";
 
 export type { TrackAnalysis, KeyEstimate, ChordSegment } from "./analysis-core";
+export type { MelodyNote, MelodyResult } from "./melody-core";
 
 function runWorker<T>(
-  mode: "analysis" | "chords",
+  mode: "analysis" | "chords" | "melody",
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,
@@ -48,4 +50,12 @@ export function analyzeChords(
   key?: { tonic: number; mode: "major" | "minor" },
 ): Promise<ChordSegment[]> {
   return runWorker<ChordSegment[]>("chords", left, right, sampleRate, key);
+}
+
+export function analyzeMelody(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number = SAMPLE_RATE,
+): Promise<MelodyResult> {
+  return runWorker<MelodyResult>("melody", left, right, sampleRate);
 }

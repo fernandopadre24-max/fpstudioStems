@@ -16,7 +16,13 @@ import {
   type AudioFormat,
   type DecodedAudio,
 } from "./lib/audio";
-import { analyzeChords, analyzeTrack, type ChordSegment, type TrackAnalysis } from "./lib/analysis";
+import {
+  analyzeChords,
+  analyzeMelody,
+  analyzeTrack,
+  type ChordSegment,
+  type TrackAnalysis,
+} from "./lib/analysis";
 import { cifraToText, fetchCifra, type CifraQuery, type CifraResult } from "./lib/chords";
 import {
   DEFAULT_WHISPER_ID,
@@ -52,8 +58,12 @@ import {
   type LyricsResult,
 } from "./lib/lyrics";
 import { LyricsEngine, toWhisperAudio, whisperToLrc, type TranscribeProgress } from "./lib/lyricsClient";
+import { buildMidi } from "./lib/midi";
+import { buildMusicXml } from "./lib/musicxml";
 import type { WorkerResponse } from "./lib/protocol";
+import { buildAbc, buildScore, type Score } from "./lib/score";
 import { SeparationEngine } from "./lib/separationClient";
+import { ScoreView } from "./components/ScoreView";
 
 type Phase = "idle" | "decoding" | "ready" | "separating" | "done";
 type ModelStatus = "unknown" | "missing" | "downloading" | "ready";
@@ -138,6 +148,11 @@ export default function App() {
   const [cifraStatus, setCifraStatus] = useState<"idle" | "loading">("idle");
   const [cifraError, setCifraError] = useState<string | null>(null);
   const [lyricsTab, setLyricsTab] = useState<"cifra" | "harmony" | "lyrics">("cifra");
+  const [scoreSource, setScoreSource] = useState("");
+  const [scoreStatus, setScoreStatus] = useState<"idle" | "working">("idle");
+  const [scoreError, setScoreError] = useState<string | null>(null);
+  const [score, setScore] = useState<Score | null>(null);
+  const [scoreStep, setScoreStep] = useState("");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const saved = localStorage.getItem("stemroller.theme");
@@ -565,6 +580,123 @@ export default function App() {
       setChordsLoading(false);
     }
   }, [analysis, chords, decoded]);
+
+  // Fontes disponiveis para a partitura: as trilhas separadas (voz/instrumento)
+  // e, se houver, a musica original.
+  const scoreSources = useMemo(() => {
+    const priority: StemId[] = [
+      "leadVocal",
+      "vocals",
+      "guitar",
+      "piano",
+      "other",
+      "bass",
+      "backingVocal",
+      "drums",
+    ];
+    const options: { id: string; label: string }[] = [];
+    const ordered = (results ?? []).slice().sort((a, b) => {
+      const ia = priority.indexOf(a.id);
+      const ib = priority.indexOf(b.id);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    for (const stem of ordered) {
+      const meta = STEMS.find((item) => item.id === stem.id);
+      options.push({ id: stem.id, label: meta?.label ?? String(stem.id) });
+    }
+    if (decoded) options.push({ id: "original", label: "Música original (mix)" });
+    return options;
+  }, [decoded, results]);
+
+  useEffect(() => {
+    if (scoreSources.length === 0) return;
+    setScoreSource((current) =>
+      scoreSources.some((option) => option.id === current) ? current : scoreSources[0].id,
+    );
+  }, [scoreSources]);
+
+  useEffect(() => {
+    setScore(null);
+    setScoreError(null);
+  }, [file, scoreSource]);
+
+  const scoreAbc = useMemo(() => (score ? buildAbc(score) : ""), [score]);
+
+  const generateScore = useCallback(async () => {
+    if (!decoded) return;
+    setScoreError(null);
+    setScore(null);
+    setScoreStatus("working");
+    setScoreStep("Extraindo a melodia...");
+    try {
+      let left: Float32Array;
+      let right: Float32Array;
+      let instrumentLabel: string;
+      if (scoreSource === "original" || !results) {
+        left = decoded.left;
+        right = decoded.right;
+        instrumentLabel = "Música original";
+      } else {
+        const stem = results.find((item) => item.id === scoreSource);
+        if (!stem) throw new Error("Trilha não encontrada.");
+        left = stem.left;
+        right = stem.right;
+        instrumentLabel = STEMS.find((item) => item.id === stem.id)?.label ?? String(stem.id);
+      }
+
+      const melody = await analyzeMelody(left, right, SAMPLE_RATE);
+      if (melody.notes.length === 0) {
+        throw new Error(
+          "Não encontrei uma melodia nessa trilha. Tente a voz principal ou outro instrumento de solo.",
+        );
+      }
+
+      setScoreStep("Alinhando com a harmonia...");
+      let chordSegments = chords;
+      if (!chordSegments) {
+        try {
+          chordSegments = await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key);
+          setChords(chordSegments);
+        } catch {
+          chordSegments = null;
+        }
+      }
+
+      const built = buildScore(melody.notes, {
+        bpm: analysis?.bpm,
+        key: analysis?.key ?? null,
+        chords: chordSegments ?? [],
+        instrumentLabel,
+        title: identity.title || baseName,
+        artist: identity.artist,
+        medianMidi: melody.medianMidi,
+      });
+      setScore(built);
+    } catch (cause) {
+      setScoreError(cause instanceof Error ? cause.message : "Falha ao gerar a partitura.");
+    } finally {
+      setScoreStatus("idle");
+      setScoreStep("");
+    }
+  }, [analysis, baseName, chords, decoded, identity, results, scoreSource]);
+
+  const downloadScoreXml = useCallback(() => {
+    if (!score) return;
+    const xml = buildMusicXml(score);
+    downloadBlob(
+      new Blob([xml], { type: "application/vnd.recordare.musicxml+xml;charset=utf-8" }),
+      `${baseName} - partitura.musicxml`,
+    );
+  }, [baseName, score]);
+
+  const downloadScoreMidi = useCallback(() => {
+    if (!score) return;
+    const midi = buildMidi(score);
+    downloadBlob(
+      new Blob([midi.buffer as ArrayBuffer], { type: "audio/midi" }),
+      `${baseName} - partitura.mid`,
+    );
+  }, [baseName, score]);
 
   const searchCifra = useCallback(async () => {
     setCifraError(null);
@@ -1311,6 +1443,89 @@ export default function App() {
               onDownload={(id) => downloadStem(id)}
               downloadLabel={ext.toUpperCase()}
             />
+          </section>
+        )}
+
+        {decoded && (
+          <section className="panel score-panel">
+            <div className="section-head">
+              <h2>Partitura</h2>
+              <p>
+                Transcreve a melodia de uma trilha (voz principal ou instrumento de solo) para um
+                pentagrama, com a harmonia (cifra) por cima. Roda inteiramente no seu navegador.
+              </p>
+            </div>
+
+            <div className="controls-row">
+              <label className="field">
+                <span>Voz / instrumento</span>
+                <select
+                  value={scoreSource}
+                  onChange={(event) => setScoreSource(event.target.value)}
+                  disabled={scoreStatus === "working" || scoreSources.length === 0}
+                >
+                  {scoreSources.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void generateScore()}
+                disabled={scoreStatus === "working" || scoreSources.length === 0}
+              >
+                {scoreStatus === "working" ? "Gerando..." : "Gerar partitura"}
+              </button>
+
+              {score && (
+                <>
+                  <button type="button" className="btn btn-ghost" onClick={downloadScoreXml}>
+                    Baixar MusicXML
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={downloadScoreMidi}>
+                    Baixar MIDI
+                  </button>
+                </>
+              )}
+            </div>
+
+            {scoreStatus === "working" && scoreStep && (
+              <div className="progress-block">
+                <div className="progress-label">{scoreStep}</div>
+                <div className="bar bar-indeterminate" />
+              </div>
+            )}
+
+            {scoreError && (
+              <div className="score-error" role="alert">
+                {scoreError}
+              </div>
+            )}
+
+            {score && scoreAbc && (
+              <div className="score-result">
+                <div className="score-meta">
+                  <span>
+                    Tonalidade: <b>{score.keyLabel}</b>
+                  </span>
+                  <span>
+                    BPM: <b>{Math.round(score.bpm)}</b>
+                  </span>
+                  <span>
+                    Compasso:{" "}
+                    <b>
+                      {score.beatsPerBar}/{score.beatType}
+                    </b>
+                  </span>
+                  <span>{score.notes.length} notas detectadas</span>
+                </div>
+                <ScoreView abc={scoreAbc} color={theme === "light" ? "#1a1d27" : "#e7ecf7"} />
+              </div>
+            )}
           </section>
         )}
 
