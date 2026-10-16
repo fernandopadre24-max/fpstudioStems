@@ -292,7 +292,13 @@ function estimateMelodyTempo(notes: MelodyNote[], baseBpm: number): number {
   const median = intervals[intervals.length >> 1];
   if (!(median > 0.05)) return baseBpm;
 
-  let bpm = 60 / median;
+  // Media dos intervalos proximos da mediana. A mediana sozinha oscila alguns
+  // milissegundos, o que ja basta para o BPM sair 117 em vez de 120 e a grade
+  // desalinhar no fim da musica (a nota vira pontuada + semicolcheia).
+  const close = intervals.filter((value) => Math.abs(value - median) <= median * 0.25);
+  const beat = close.reduce((total, value) => total + value, 0) / Math.max(1, close.length);
+
+  let bpm = 60 / beat;
   while (bpm < 70) bpm *= 2;
   while (bpm > 160) bpm /= 2;
   // Se a melodia destoa demais do tempo da analise, e mais seguro confiar nela.

@@ -87,7 +87,10 @@ export function ScoreView({
       return;
     }
 
-    const parts = svg.querySelectorAll(`.abcjs-m${index}`);
+    // `abcjs-m<N>` e o compasso dentro da linha (recomeca a contar em cada
+    // sistema); `abcjs-mm<N>` e o compasso absoluto, que e o que corresponde ao
+    // tempo. Com `m` a agulha so andava no primeiro sistema e parava depois.
+    const parts = svg.querySelectorAll(`.abcjs-mm${index}`);
     const matrix = svg.getScreenCTM();
     if (parts.length === 0 || !matrix) {
       hide();
