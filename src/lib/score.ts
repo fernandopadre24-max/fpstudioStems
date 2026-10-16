@@ -46,6 +46,8 @@ export interface Score {
   beatsPerBar: number;
   beatType: number;
   unitsPerMeasure: number;
+  /** Unidades (semicolcheias) por tempo. Em compassos compostos o tempo e pontuado. */
+  unitsPerBeat: number;
   gridSeconds: number;
   /** Instante (s) do inicio do compasso 1, relativo ao inicio do audio. */
   offset: number;
@@ -512,6 +514,7 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
     beatsPerBar,
     beatType,
     unitsPerMeasure,
+    unitsPerBeat,
     gridSeconds,
     offset,
     measureSeconds: (60 / bpm) * beatsPerBar,
@@ -562,25 +565,44 @@ export function buildAbc(score: Score): string {
   // compasso fosse para uma linha, cada um viraria um pentagrama proprio (sem
   // barras internas). Agrupar alguns compassos por linha mantem a divisao
   // visivel mesmo quando o renderizador nao reorganiza as linhas sozinho.
+  // Vigas: em ABC um espaco entre duas notas quebra a viga, entao notas curtas
+  // (menores que uma seminima) do mesmo tempo sao escritas coladas. A viga
+  // quebra na barra de tempo, como manda a grafacao; em compassos compostos o
+  // tempo e pontuado (3 colcheias por viga em 6/8, por exemplo).
   const measuresPerLine = 4;
   const total = score.measures.length;
+  const beat = Math.max(1, score.unitsPerBeat);
+  const isShortNote = (event: ScoreEvent) =>
+    event.kind === "note" && event.units >= 1 && event.units < 4;
   for (let start = 0; start < total; start += measuresPerLine) {
     const chunk = score.measures.slice(start, start + measuresPerLine);
     const tokens: string[] = [];
     chunk.forEach((measure, index) => {
-      const measureTokens: string[] = [];
+      let body = "";
+      let position = 0;
+      let previousBeat = -1;
+      let previousShort = false;
       for (const event of measure.events) {
         const length = event.units === 1 ? "" : String(event.units);
+        let token: string;
         if (event.kind === "rest") {
-          measureTokens.push(`z${length}`);
-          continue;
+          token = `z${length}`;
+        } else {
+          const chordPrefix = event.chord ? `"${event.chord}"` : "";
+          const tie = event.tieStart ? "-" : "";
+          token = `${chordPrefix}${abcPitch(event)}${length}${tie}`;
         }
-        const chordPrefix = event.chord ? `"${event.chord}"` : "";
-        const tie = event.tieStart ? "-" : "";
-        measureTokens.push(`${chordPrefix}${abcPitch(event)}${length}${tie}`);
+        const beatIndex = Math.floor(position / beat);
+        const short = isShortNote(event);
+        const join = short && previousShort && beatIndex === previousBeat && !event.tieEnd;
+        if (body !== "" && !join) body += " ";
+        body += token;
+        previousShort = short;
+        previousBeat = beatIndex;
+        position += event.units;
       }
       const isLast = start + index === total - 1;
-      tokens.push(measureTokens.join(" ") + (isLast ? " |]" : " |"));
+      tokens.push(`${body}${isLast ? " |]" : " |"}`);
     });
     lines.push(tokens.join(" "));
   }
