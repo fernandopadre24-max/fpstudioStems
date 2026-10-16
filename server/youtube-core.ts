@@ -622,26 +622,37 @@ async function tryInvidiousInstance(
 
 async function openInvidiousAudio(id: string): Promise<Response> {
   let lastError = "Invidious indisponivel.";
-  const instances = await getInvidiousInstanceList();
-  for (const base of instances) {
-    try {
-      // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
-      const proxied = await tryInvidiousInstance(base, id, false);
-      if (proxied) {
-        lastGoodInstance = base;
-        return proxied;
-      }
+  const all = await getInvidiousInstanceList();
+  // So tentamos as primeiras (conhecidas) para nao estourar o tempo da funcao.
+  const instances = all.slice(0, 12);
+  const deadline = Date.now() + 45_000;
+  // A instancia que funciona (f5.si) tem um "companion" que oscila por alguns
+  // segundos; damos uma segunda passada antes de desistir.
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const base of instances) {
+      if (Date.now() > deadline) break;
+      try {
+        // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
+        const proxied = await tryInvidiousInstance(base, id, false);
+        if (proxied) {
+          lastGoodInstance = base;
+          return proxied;
+        }
 
-      // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
-      const direct = await tryInvidiousInstance(base, id, true);
-      if (direct) {
-        lastGoodInstance = base;
-        return direct;
-      }
+        // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
+        const direct = await tryInvidiousInstance(base, id, true);
+        if (direct) {
+          lastGoodInstance = base;
+          return direct;
+        }
 
-      lastError = `${base}: audio bloqueado`;
-    } catch (cause) {
-      lastError = `${base}: ${cause instanceof Error ? cause.message : String(cause)}`;
+        lastError = `${base}: audio bloqueado`;
+      } catch (cause) {
+        lastError = `${base}: ${cause instanceof Error ? cause.message : String(cause)}`;
+      }
+    }
+    if (pass === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   }
   throw new Error(lastError);

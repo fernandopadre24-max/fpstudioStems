@@ -60,6 +60,30 @@ export async function downloadYouTubeAudio(
   onProgress?: (progress: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<File> {
+  // No modo publico o audio vem de uma instancia Invidious que oscila; tentamos
+  // algumas vezes antes de desistir, para o usuario nao precisar clicar de novo.
+  const attempts = 3;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await downloadYouTubeAudioOnce(id, title, onProgress, signal);
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+      lastError = cause;
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Falha ao baixar o audio.");
+}
+
+async function downloadYouTubeAudioOnce(
+  id: string,
+  title: string,
+  onProgress?: (progress: DownloadProgress) => void,
+  signal?: AbortSignal,
+): Promise<File> {
   const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`, { signal });
   console.log('[downloadYouTubeAudio] Response status:', response.status, response.ok);
   if (!response.ok) throw new Error(await describeError(response));
