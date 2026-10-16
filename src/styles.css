@@ -1050,6 +1050,38 @@ body {
   color: #ffb1bd;
 }
 
+.yt-block-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid rgba(255, 177, 189, 0.35);
+  background: rgba(255, 177, 189, 0.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  line-height: 1.5;
+}
+
+.yt-block-notice strong {
+  color: #ffd0d7;
+  font-size: 13.4px;
+}
+
+.yt-block-detail {
+  margin-top: 4px;
+  font-size: 11.6px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+[data-theme="light"] .yt-block-notice {
+  border-color: rgba(190, 30, 60, 0.3);
+  background: rgba(190, 30, 60, 0.06);
+}
+
+[data-theme="light"] .yt-block-notice strong {
+  color: #a1143a;
+}
+
 .yt-progress {
   display: flex;
   flex-direction: column;

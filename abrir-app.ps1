@@ -87,6 +87,19 @@ if ($publicUrl) {
   Write-Host "  Local tambem funciona: http://localhost:$localPort" -ForegroundColor Green
   Write-Host "============================================================" -ForegroundColor Green
   Write-Host ""
+  Info "No celular: aponte a camera para o QR abaixo (ou digite a URL)."
+  try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $qrScript = Join-Path $root "scripts\print-qr.mjs"
+    if (Test-Path -LiteralPath $qrScript) {
+      & node $qrScript $publicUrl
+    } else {
+      Warn "QR indisponivel (scripts\print-qr.mjs nao encontrado)."
+    }
+  } catch {
+    Warn "Nao consegui desenhar o QR: $($_.Exception.Message)"
+  }
+  Write-Host ""
   Warn "IMPORTANTE: deixe esta janela aberta enquanto usa o app."
   Warn "Para encerrar: feche esta janela ou aperte Ctrl+C."
   try { Start-Process $publicUrl } catch { }

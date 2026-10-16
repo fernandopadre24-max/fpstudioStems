@@ -151,6 +151,11 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
     progress && progress.total && progress.total > 0
       ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
       : null;
+  // O YouTube bloqueia o IP de datacenter da Vercel ("Sign in to confirm you're
+  // not a bot" / cookies expirados). Nesse caso mostramos um aviso mais claro.
+  const blocked = error !== null && /bot|cookie|expirad|bloquead|sign in/i.test(error);
+  const hosted =
+    typeof location !== "undefined" && /(^|\.)vercel\.app$/i.test(location.hostname);
 
   return (
     <div className="yt">
@@ -182,7 +187,28 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
         </p>
       )}
 
-      {error && <p className="yt-note yt-note-error">{error}</p>}
+      {error &&
+        (blocked ? (
+          <div className="yt-note yt-note-error yt-block-notice">
+            <strong>O YouTube bloqueou o download pelo servidor online.</strong>
+            {hosted && (
+              <span>
+                Este endereco (Vercel) usa um IP de datacenter e o YouTube exige login. Duas
+                saidas:
+              </span>
+            )}
+            <span>
+              1) Use o app rodando no seu PC (modo local/tunel) — o download sai pelo seu IP e
+              funciona sempre.
+            </span>
+            <span>
+              2) Ou reexporte os cookies do YouTube estando logado e rode o configurar-cookies.
+            </span>
+            <span className="yt-block-detail">{error}</span>
+          </div>
+        ) : (
+          <p className="yt-note yt-note-error">{error}</p>
+        ))}
       {searching && <p className="yt-note">Buscando resultados...</p>}
       {downloading && (
         <div className="yt-progress" role="status" aria-live="polite">
