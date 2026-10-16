@@ -752,6 +752,16 @@ function proxyStatus(): string {
   return ytProxy ? "proxy:sim" : "proxy:nao";
 }
 
+// No modo publico (Vercel) o download do YouTube fica desativado: o YouTube
+// bloqueia IPs de datacenter e manter cookies/proxy e fragil. No modo local
+// (seu PC, IP residencial) o download funciona. Um proxy residencial
+// (YTDLP_PROXY) reabilita no modo publico.
+export function youtubeEnabled(): boolean {
+  if (process.env.YOUTUBE_ENABLED === "0") return false;
+  if (ytProxy) return true;
+  return !process.env.VERCEL;
+}
+
 async function streamYtDlpAudio(
   id: string,
   response: ServerResponse,
@@ -856,11 +866,17 @@ export async function handleYouTubeApi(
     if (route === "status") {
       // A busca agora usa a API do Invidious (instantanea), entao nao ha nada
       // para preparar: o yt-dlp so e baixado sob demanda se o Invidious falhar.
-      sendJson(response, 200, { status: "ready", error: null });
+      sendJson(response, 200, { status: "ready", error: null, enabled: youtubeEnabled() });
       return;
     }
 
     if (route === "search") {
+      if (!youtubeEnabled()) {
+        sendJson(response, 403, {
+          error: "O download do YouTube esta disponivel apenas no modo local (no seu computador).",
+        });
+        return;
+      }
       const query = requestUrl.searchParams.get("q")?.trim();
       if (!query) {
         sendJson(response, 400, { error: "Informe um termo de busca." });
@@ -872,6 +888,12 @@ export async function handleYouTubeApi(
     }
 
     if (route === "audio") {
+      if (!youtubeEnabled()) {
+        sendJson(response, 403, {
+          error: "O download do YouTube esta disponivel apenas no modo local (no seu computador).",
+        });
+        return;
+      }
       const id = (requestUrl.searchParams.get("id") ?? "").trim();
       if (!/^[A-Za-z0-9_-]{6,20}$/.test(id)) {
         sendJson(response, 400, { error: "Identificador de video invalido." });

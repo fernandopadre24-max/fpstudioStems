@@ -38,6 +38,7 @@ import {
   totalSize,
   type ZipEntry,
 } from "./lib/download";
+import { getYtDlpStatus } from "./lib/youtube";
 import {
   buildChordChart,
   chordChartToText,
@@ -93,6 +94,9 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [file, setFile] = useState<File | null>(null);
   const [decoded, setDecoded] = useState<DecodedAudio | null>(null);
+  // No link publico (Vercel) o download do YouTube fica desativado; no modo
+  // local funciona. Comeca "true" para nao piscar no modo local.
+  const [youtubeEnabled, setYoutubeEnabled] = useState(true);
   const [originalPeaks, setOriginalPeaks] = useState<Float32Array | null>(null);
   const [originalBuffer, setOriginalBuffer] = useState<AudioBuffer | null>(null);
   const [instrumental, setInstrumental] = useState<AudioBuffer | null>(null);
@@ -163,6 +167,22 @@ export default function App() {
     },
     [],
   );
+
+  // Descobre se o download do YouTube esta disponivel (modo local). No link
+  // publico (Vercel) o servidor responde enabled:false e escondemos a busca.
+  useEffect(() => {
+    let active = true;
+    getYtDlpStatus(false)
+      .then((status) => {
+        if (active && status.enabled === false) setYoutubeEnabled(false);
+      })
+      .catch(() => {
+        // Sem servidor de YouTube: mantem o padrao (modo local).
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const applyResults = useCallback((stems: ResultStem[]) => {
     setResults(stems);
@@ -796,19 +816,37 @@ export default function App() {
 
         {!file ? (
           <div className="source">
-            <section className="panel">
-              <div className="section-head">
-                <h2>Buscar no YouTube</h2>
-                <p>
-                  Procure uma musica, escolha o resultado e o audio sera baixado para separar. Voce
-                  tambem pode colar o link do video.
+            {youtubeEnabled ? (
+              <section className="panel">
+                <div className="section-head">
+                  <h2>Buscar no YouTube</h2>
+                  <p>
+                    Procure uma musica, escolha o resultado e o audio sera baixado para separar. Voce
+                    tambem pode colar o link do video.
+                  </p>
+                </div>
+                <YouTubeSearch disabled={busy} onSelect={handleFile} />
+              </section>
+            ) : (
+              <section className="panel">
+                <div className="section-head">
+                  <h2>Envie sua musica</h2>
+                  <p>
+                    Aqui voce separa os instrumentos de qualquer musica. Envie um arquivo de audio
+                    para comecar.
+                  </p>
+                </div>
+                <p className="source-note">
+                  O download direto do YouTube esta disponivel apenas no modo local (no seu
+                  computador). Envie um arquivo MP3, WAV, M4A, OGG ou FLAC — funciona igual.
                 </p>
+              </section>
+            )}
+            {youtubeEnabled ? (
+              <div className="source-divider">
+                <span>ou envie um arquivo</span>
               </div>
-              <YouTubeSearch disabled={busy} onSelect={handleFile} />
-            </section>
-            <div className="source-divider">
-              <span>ou envie um arquivo</span>
-            </div>
+            ) : null}
             <DropZone
               label="Arraste sua musica aqui"
               hint="ou clique para escolher — MP3, WAV, M4A, OGG, FLAC"

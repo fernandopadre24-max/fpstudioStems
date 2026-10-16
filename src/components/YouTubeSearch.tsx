@@ -36,7 +36,7 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   const [cancelling, setCancelling] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [engine, setEngine] = useState<"loading" | "ready" | "error">("loading");
+  const [engine, setEngine] = useState<"loading" | "ready" | "error" | "disabled">("loading");
   const [engineError, setEngineError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,6 +47,10 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
       try {
         const status = await getYtDlpStatus(true);
         if (!active) return;
+        if (status.enabled === false) {
+          setEngine("disabled");
+          return;
+        }
         if (status.status === "ready") {
           setEngine("ready");
           return;

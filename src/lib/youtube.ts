@@ -10,6 +10,9 @@ export interface YouTubeResult {
 export interface YtDlpStatus {
   status: "idle" | "downloading" | "ready" | "error";
   error: string | null;
+  // false no modo publico (Vercel): o download do YouTube so funciona no modo
+  // local (seu PC) ou com proxy residencial.
+  enabled?: boolean;
 }
 
 async function describeError(response: Response): Promise<string> {
