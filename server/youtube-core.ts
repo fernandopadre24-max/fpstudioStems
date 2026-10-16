@@ -446,13 +446,16 @@ async function solveAnubis(base: string, pageUrl: string): Promise<AnubisSolve> 
     }
     const body = await challengeResponse.text();
     const challengePageCookies = setCookiePairs(challengeResponse);
-    const match = body.match(/\{"rules":[\s\S]*?"spent":(?:true|false)\}\}/);
+    // O JSON do desafio vem num <script id="anubis_challenge">; campos extras
+    // (ex.: "extensions") vem depois de "spent", entao nao da para casar so pelo
+    // fim do objeto.
+    const match = body.match(/<script id="anubis_challenge"[^>]*>([\s\S]*?)<\/script>/);
     if (!match) {
       const snippet = body.replace(/\s+/g, " ").trim().slice(0, 220);
       return { cookie: null, error: `sem challenge JSON (len=${body.length}): ${snippet}` };
     }
 
-    const parsed = JSON.parse(match[0]) as {
+    const parsed = JSON.parse(match[1].trim()) as {
       rules: { difficulty: number };
       challenge: { id: string; randomData: string };
     };
@@ -635,15 +638,16 @@ async function openInvidiousAudio(id: string): Promise<Response> {
       if (Date.now() > deadline) break;
       const host = base.replace(/^https?:\/\//, "");
       try {
-        // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
-        const proxied = await tryInvidiousInstance(base, id, false);
+        // Proxiado pela instancia (local=true): e o caminho confiavel no Vercel,
+        // pois os bytes vem da instancia (o googlevideo estrangula datacenter).
+        const proxied = await tryInvidiousInstance(base, id, true);
         if (proxied.response) {
           lastGoodInstance = base;
           return proxied.response;
         }
 
-        // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
-        const direct = await tryInvidiousInstance(base, id, true);
+        // Fallback: URL direta do googlevideo (local=false) — melhor em IP residencial.
+        const direct = await tryInvidiousInstance(base, id, false);
         if (direct.response) {
           lastGoodInstance = base;
           return direct.response;
