@@ -359,6 +359,10 @@ let cachedInstances: string[] = [];
 let instancesCachedAt = 0;
 const INSTANCES_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 
+// Ultima instancia que entregou audio (por instancia da funcao): tentamos ela
+// primeiro nas proximas chamadas para responder rapido.
+let lastGoodInstance: string | null = null;
+
 async function getInvidiousInstances(): Promise<string[]> {
   const now = Date.now();
   if (cachedInstances.length > 0 && now - instancesCachedAt < INSTANCES_CACHE_TTL_MS) {
@@ -388,10 +392,15 @@ async function getInvidiousInstances(): Promise<string[]> {
 
 async function getInvidiousInstanceList(): Promise<string[]> {
   const discovered = await getInvidiousInstances();
-  // Combina descobertos + fallback sem duplicatas, descobertos primeiro
-  const merged = [...discovered];
+  // Instancias conhecidas/testadas primeiro: as descobertas costumam estar
+  // mortas e cada falha custa segundos. A ultima que funcionou vem na frente.
+  const merged: string[] = [];
+  if (lastGoodInstance) merged.push(lastGoodInstance);
   for (const fb of INVIDIOUS_INSTANCES_FALLBACK) {
     if (!merged.includes(fb)) merged.push(fb);
+  }
+  for (const d of discovered) {
+    if (!merged.includes(d)) merged.push(d);
   }
   return merged;
 }
@@ -493,7 +502,7 @@ async function invidiousJson<T>(base: string, pathAndQuery: string): Promise<T |
     const response = await fetch(url, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(10_000),
     });
     if (response.status === 200) {
       const contentType = response.headers.get("content-type") ?? "";
@@ -618,11 +627,17 @@ async function openInvidiousAudio(id: string): Promise<Response> {
     try {
       // Tenta primeiro via proxy da instancia (local=false) — funciona em datacenter
       const proxied = await tryInvidiousInstance(base, id, false);
-      if (proxied) return proxied;
+      if (proxied) {
+        lastGoodInstance = base;
+        return proxied;
+      }
 
       // Fallback: URL direta do googlevideo (local=true) — funciona em IPs residenciais
       const direct = await tryInvidiousInstance(base, id, true);
-      if (direct) return direct;
+      if (direct) {
+        lastGoodInstance = base;
+        return direct;
+      }
 
       lastError = `${base}: audio bloqueado`;
     } catch (cause) {
@@ -669,16 +684,20 @@ export async function streamYouTubeAudio(
   playerClient?: string,
 ): Promise<void> {
   const errors: string[] = [];
-  const hasCookies = Boolean(await ensureCookies());
+  await ensureCookies();
   errors.push(cookieStatus());
   errors.push(proxyStatus());
-  // Local (sem VERCEL): o IP nao e datacenter, entao o yt-dlp funciona direto.
-  // No Vercel, sem cookies o yt-dlp e bloqueado -> Invidious primeiro.
-  const preferYtDlp = hasCookies || !process.env.VERCEL || Boolean(playerClient);
-  if (preferYtDlp && (await streamYtDlpAudio(id, response, errors, playerClient))) return;
-  if (await streamInvidiousAudio(id, response, errors)) return;
-  if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
-  if (await streamInvidiousAudio(id, response, errors)) return;
+  // No Vercel o yt-dlp e bloqueado pelo bot-check (IP de datacenter), entao a
+  // instancia Invidious vem primeiro. No modo local (ou com proxy residencial)
+  // o yt-dlp e direto e mais rapido, entao ele vem primeiro.
+  const preferInvidious = Boolean(process.env.VERCEL) && !ytProxy && !playerClient;
+  if (preferInvidious) {
+    if (await streamInvidiousAudio(id, response, errors)) return;
+    if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
+  } else {
+    if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
+    if (await streamInvidiousAudio(id, response, errors)) return;
+  }
   const joinedErrors = errors.join(" ");
   const cookiesHint =
     /not a bot|no longer valid|rotated|Sign in to confirm/i.test(joinedErrors)
@@ -752,14 +771,11 @@ function proxyStatus(): string {
   return ytProxy ? "proxy:sim" : "proxy:nao";
 }
 
-// No modo publico (Vercel) o download do YouTube fica desativado: o YouTube
-// bloqueia IPs de datacenter e manter cookies/proxy e fragil. No modo local
-// (seu PC, IP residencial) o download funciona. Um proxy residencial
-// (YTDLP_PROXY) reabilita no modo publico.
+// O download fica habilitado por padrao. No modo publico (Vercel) o audio vem
+// da instancia Invidious (que passa pelo bloqueio de datacenter); no modo local
+// vem direto do yt-dlp. YOUTUBE_ENABLED=0 desliga (kill switch).
 export function youtubeEnabled(): boolean {
-  if (process.env.YOUTUBE_ENABLED === "0") return false;
-  if (ytProxy) return true;
-  return !process.env.VERCEL;
+  return process.env.YOUTUBE_ENABLED?.trim() !== "0";
 }
 
 async function streamYtDlpAudio(
