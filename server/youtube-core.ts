@@ -678,9 +678,15 @@ export async function streamYouTubeAudio(
   if (await streamInvidiousAudio(id, response, errors)) return;
   if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
   if (await streamInvidiousAudio(id, response, errors)) return;
+  const joinedErrors = errors.join(" ");
+  const cookiesHint =
+    /not a bot|no longer valid|rotated|Sign in to confirm/i.test(joinedErrors)
+      ? " Dica: os cookies do YouTube podem estar expirados — exporte novamente logado no YouTube e rode o configurar-cookies."
+      : "";
   sendJson(response, 502, {
     error:
-      "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio.",
+      "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio." +
+      cookiesHint,
     ...(errors.length ? { detail: errors.slice(-5).join(" | ") } : {}),
   });
 }

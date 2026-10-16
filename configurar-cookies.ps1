@@ -73,6 +73,27 @@ $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($CookiesPath))
 $sizeKb = [math]::Round((Get-Item -LiteralPath $CookiesPath).Length / 1kb, 1)
 Ok "cookies.txt OK ($sizeKb KB, $($content.Length) chars)"
 
+# 1.5) Valida os cookies com o yt-dlp local (se ja existir). Cookies expirados
+# ("rotacionados") sao a causa numero 1 do bloqueio "Sign in to confirm you're
+# not a bot" na Vercel — melhor avisar antes de subir.
+$ytdlpPath = Join-Path (Get-Location).Path ".bin\yt-dlp.exe"
+if (Test-Path -LiteralPath $ytdlpPath) {
+  Info "Validando os cookies com o yt-dlp..."
+  $probe = (& $ytdlpPath --simulate --no-playlist --cookies $CookiesPath `
+      --print "%(title)s" "https://www.youtube.com/watch?v=jNQXAC9IVRw" 2>&1 | Out-String)
+  if ($probe -match "(?i)no longer valid|rotated") {
+    Warn "ATENCAO: o YouTube considerou estes cookies INVALIDOS (rotacionados)."
+    Warn "Exporte novamente logado no YouTube e rode o script de novo."
+    Warn "Se subir assim, o download na Vercel continua bloqueado."
+  } elseif ($probe -match "(?i)ERROR") {
+    Warn "Nao consegui validar os cookies agora (erro do yt-dlp). Sigo mesmo assim."
+  } else {
+    Ok "Cookies aceitos pelo yt-dlp."
+  }
+} else {
+  Warn "yt-dlp ainda nao esta em .bin; pulando a validacao local dos cookies."
+}
+
 # 2) Vercel CLI + login
 Info "Verificando a Vercel CLI (pode baixar na primeira vez)..."
 $who = (npx --yes vercel@latest whoami 2>&1 | Out-String)
@@ -95,8 +116,14 @@ if (-not (Test-Path -LiteralPath ".vercel\project.json")) {
 # 4) Define a variavel (remove a antiga e adiciona a nova)
 Info "Configurando a variavel YTDLP_COOKIES (production)..."
 npx --yes vercel@latest env rm YTDLP_COOKIES production --yes 2>&1 | Out-Null
-$b64 | npx --yes vercel@latest env add YTDLP_COOKIES production
-if ($LASTEXITCODE -ne 0) {
+# O valor e enviado por ARQUIVO (redirecionamento). Passar via pipe do
+# PowerShell trunca em ~8192 chars, corrompendo o base64 dos cookies.
+$b64File = Join-Path $env:TEMP "fpstems-cookies.b64"
+[IO.File]::WriteAllText($b64File, $b64)
+cmd.exe /c "npx --yes vercel@latest env add YTDLP_COOKIES production < `"$b64File`""
+$addCode = $LASTEXITCODE
+Remove-Item -LiteralPath $b64File -Force -ErrorAction SilentlyContinue
+if ($addCode -ne 0) {
   Err "Falha ao definir a variavel. Veja as mensagens acima."
   exit 1
 }
