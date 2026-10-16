@@ -1504,6 +1504,7 @@ export default function App() {
                 Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
                 cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
                 estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
+                Ao tocar os stems, uma linha marca o compasso que está soando.
               </p>
             </div>
 
@@ -1578,7 +1579,13 @@ export default function App() {
                   </span>
                   <span>{score.notes.length} notas detectadas</span>
                 </div>
-                <ScoreView abc={scoreAbc} color={theme === "light" ? "#1a1d27" : "#e7ecf7"} />
+                <ScoreView
+                  abc={scoreAbc}
+                  color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
+                  playhead={mixer.playing || mixer.position > 0 ? mixer.position : null}
+                  playheadOffset={score.offset}
+                  measureSeconds={score.measureSeconds}
+                />
               </div>
             )}
           </section>

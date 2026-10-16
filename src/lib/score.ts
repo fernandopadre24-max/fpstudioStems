@@ -47,6 +47,10 @@ export interface Score {
   beatType: number;
   unitsPerMeasure: number;
   gridSeconds: number;
+  /** Instante (s) do inicio do compasso 1, relativo ao inicio do audio. */
+  offset: number;
+  /** Duracao de um compasso em segundos. */
+  measureSeconds: number;
   keyFifths: number;
   keyLabel: string;
   keyMode: "major" | "minor";
@@ -212,7 +216,20 @@ interface RawEvent {
   midi?: number;
 }
 
-function quantizeNotes(notes: MelodyNote[], gridSeconds: number): RawEvent[] {
+// Interpretacao ritmica "ligada". O detector entrega o fim *acustico* da nota,
+// que quase sempre chega um pouco antes do proximo ataque (articulacao,
+// respiracao, decaimento do instrumento). Grafar isso ao pe da letra gera
+// "colcheia pontuada + pausa de semicolcheia" em vez da seminima real. Como no
+// Flexi-time do Sibelius, a pausa so aparece quando o silencio e de fato longo:
+// aqui a nota e estendida ate a proxima quando a folga e pequena.
+const LEGATO_GAP_RATIO = 0.5;
+const LEGATO_GAP_MAX_UNITS = 2;
+
+function quantizeNotes(
+  notes: MelodyNote[],
+  gridSeconds: number,
+  unitsPerBeat: number,
+): RawEvent[] {
   const events: RawEvent[] = [];
   if (notes.length === 0) return events;
 
@@ -220,17 +237,109 @@ function quantizeNotes(notes: MelodyNote[], gridSeconds: number): RawEvent[] {
   const firstUnits = Math.max(0, Math.round(sorted[0].start / gridSeconds));
 
   let cursor = firstUnits;
-  for (const note of sorted) {
-    let startUnits = Math.max(cursor, Math.round(note.start / gridSeconds));
+  for (let i = 0; i < sorted.length; i++) {
+    const note = sorted[i];
+    const startUnits = Math.max(cursor, Math.round(note.start / gridSeconds));
     let endUnits = Math.max(startUnits + 1, Math.round(note.end / gridSeconds));
     // Evita notas absurdamente longas por erros de deteccao.
     endUnits = Math.min(endUnits, startUnits + 32);
+
+    const next = sorted[i + 1];
+    if (next) {
+      const nextUnits = Math.max(startUnits + 1, Math.round(next.start / gridSeconds));
+      const own = endUnits - startUnits;
+      const slack = nextUnits - endUnits;
+      const allowed = Math.min(
+        LEGATO_GAP_MAX_UNITS,
+        Math.max(1, Math.round(own * LEGATO_GAP_RATIO)),
+      );
+      if (own >= 2 && slack > 0 && slack <= allowed) endUnits = nextUnits;
+    } else {
+      // Ultima nota: o detector costuma cortar o final. Se ela para a menos de
+      // uma semicolcheia do proximo tempo, arredonda para o tempo.
+      const rest = endUnits % unitsPerBeat;
+      if (rest !== 0 && unitsPerBeat - rest <= 1 && endUnits - startUnits >= 2) {
+        endUnits += unitsPerBeat - rest;
+      }
+    }
+
     const gap = startUnits - cursor;
     if (gap > 0) events.push({ kind: "rest", units: gap });
     events.push({ kind: "note", units: endUnits - startUnits, midi: note.midi });
     cursor = endUnits;
   }
   return events;
+}
+
+/**
+ * Tempo da melodia a partir dos intervalos entre ataques: e a evidencia mais
+ * direta do ritmo da propria linha (o BPM da analise vem do mix inteiro e
+ * costuma errar). O valor e dobrado/dividido ate cair numa faixa usual.
+ */
+function estimateMelodyTempo(notes: MelodyNote[], baseBpm: number): number {
+  const onsets: number[] = [];
+  for (const note of notes.slice().sort((a, b) => a.start - b.start)) {
+    const last = onsets[onsets.length - 1];
+    if (last === undefined || note.start - last > 0.04) onsets.push(note.start);
+  }
+  if (onsets.length < 6) return baseBpm;
+
+  const intervals: number[] = [];
+  for (let i = 1; i < onsets.length; i++) intervals.push(onsets[i] - onsets[i - 1]);
+  intervals.sort((a, b) => a - b);
+  const median = intervals[intervals.length >> 1];
+  if (!(median > 0.05)) return baseBpm;
+
+  let bpm = 60 / median;
+  while (bpm < 70) bpm *= 2;
+  while (bpm > 160) bpm /= 2;
+  // Se a melodia destoa demais do tempo da analise, e mais seguro confiar nela.
+  if (Math.abs(Math.log2(bpm / baseBpm)) > 0.7) return baseBpm;
+  return bpm;
+}
+
+interface GridFit {
+  /** Instante (s) em que comeca o compasso 1, em relacao ao inicio do audio. */
+  offset: number;
+  /** Erro medio de quantizacao (em semicolcheias, 0..0.5). */
+  error: number;
+}
+
+/**
+ * Desloca o compasso 1 para a grade que melhor explica os ataques. Sem isso as
+ * barras de compasso (e o cursor da partitura) ficam fora de fase com a musica.
+ */
+function fitPhase(notes: MelodyNote[], bpm: number, beatsPerBar: number): GridFit {
+  const onsets = notes.map((note) => note.start).sort((a, b) => a - b);
+  if (onsets.length < 4) return { offset: 0, error: 0.5 };
+
+  const grid = 60 / bpm / 4;
+  const measure = grid * beatsPerBar * 4;
+  const steps = 64;
+  let bestError = Infinity;
+  let bestPhase = 0;
+  for (let step = 0; step < steps; step++) {
+    const phase = (step / steps) * measure;
+    let error = 0;
+    for (const onset of onsets) {
+      const value = (onset - phase) / grid;
+      error += Math.abs(value - Math.round(value));
+    }
+    error /= onsets.length;
+    if (error < bestError) {
+      bestError = error;
+      bestPhase = phase;
+    }
+  }
+
+  // Encaixe ruim = a melodia nao confirma nenhuma grade; melhor nao deslocar.
+  if (bestError > 0.15) return { offset: 0, error: bestError };
+
+  // Mantem a primeira nota dentro do compasso 1 (o compasso pode comecar um
+  // pouco antes do audio, o que vira uma pausa inicial na pauta).
+  let offset = bestPhase;
+  if (onsets[0] - offset < 0) offset -= measure;
+  return { offset, error: bestError };
 }
 
 function chordAt(chords: ChordSegment[], time: number): string {
@@ -243,11 +352,20 @@ function chordAt(chords: ChordSegment[], time: number): string {
 }
 
 export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Score {
-  const bpm = options.bpm && options.bpm > 20 ? options.bpm : DEFAULT_BPM;
+  const baseBpm = options.bpm && options.bpm > 20 ? options.bpm : DEFAULT_BPM;
   const beatsPerBar = options.beatsPerBar ?? 4;
   const beatType = options.beatType ?? 4;
-  const gridSeconds = 60 / bpm / 4; // semicolcheia
   const unitsPerMeasure = Math.round((beatsPerBar * 16) / beatType);
+  // Tempo e alinhamento do compasso tirados da propria melodia (a analise do
+  // mix pode errar o BPM, e isso desalinha toda a pauta).
+  const bpm = estimateMelodyTempo(notes, baseBpm);
+  const fit = fitPhase(notes, bpm, beatsPerBar);
+  const offset = fit.offset;
+  const gridSeconds = 60 / bpm / 4; // semicolcheia
+  const unitsPerBeat =
+    beatType === 8
+      ? Math.max(1, Math.round((unitsPerMeasure / beatsPerBar) * 3))
+      : Math.max(1, Math.round(unitsPerMeasure / beatsPerBar));
 
   const tonic = options.key ? mod12(options.key.tonic) : 0;
   const keyMode: "major" | "minor" = options.key?.mode ?? "major";
@@ -274,7 +392,11 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
     diatonic.set(pc, { step: letter, alter });
   }
 
-  const rawEvents = quantizeNotes(notes, gridSeconds);
+  const shifted =
+    offset === 0
+      ? notes
+      : notes.map((note) => ({ ...note, start: note.start - offset, end: note.end - offset }));
+  const rawEvents = quantizeNotes(shifted, gridSeconds, unitsPerBeat);
   const chords = options.chords ?? [];
   const measures: ScoreMeasure[] = [];
   let currentEvents: ScoreEvent[] = [];
@@ -334,7 +456,11 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
     let remaining = event.units;
     let firstPiece = true;
     while (remaining > 0) {
-      const take = Math.min(remaining, remainingInMeasure);
+      let take = Math.min(remaining, remainingInMeasure);
+      // Fora do tempo, a nota se divide na barra de tempo e as partes ficam
+      // ligadas (como o Sibelius faz em compassos simples).
+      const offsetInBeat = (unitsPerMeasure - remainingInMeasure) % unitsPerBeat;
+      if (offsetInBeat !== 0) take = Math.min(take, unitsPerBeat - offsetInBeat);
       const pieces = decompose(take);
       for (let i = 0; i < pieces.length; i++) {
         const lastPiece = remaining === take && i === pieces.length - 1;
@@ -387,6 +513,8 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
     beatType,
     unitsPerMeasure,
     gridSeconds,
+    offset,
+    measureSeconds: (60 / bpm) * beatsPerBar,
     keyFifths,
     keyLabel,
     keyMode,
@@ -427,6 +555,8 @@ export function buildAbc(score: Score): string {
   lines.push("L:1/16");
   lines.push(`Q:1/4=${Math.round(score.bpm)}`);
   lines.push(`K:${score.keyLabel} clef=${score.clef}`);
+  // Numeros de compasso em cada barra, como numa edicao de estudo.
+  lines.push("%%barnumbers 1");
 
   // O abcjs respeita as quebras de linha do ABC como quebras de pauta. Se cada
   // compasso fosse para uma linha, cada um viraria um pentagrama proprio (sem
