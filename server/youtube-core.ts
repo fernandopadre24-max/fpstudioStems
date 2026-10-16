@@ -582,8 +582,9 @@ async function fetchInvidiousStream(base: string, audioUrl: string): Promise<Res
 
     if (audioResponse.status >= 300 && audioResponse.status < 400) {
       const location = audioResponse.headers.get("location");
-      if (location?.startsWith(base)) {
-        current = location;
+      if (location) {
+        // Segue redirecionamentos (inclusive entre hosts do googlevideo).
+        current = new URL(location, current).toString();
         continue;
       }
       return null;
@@ -611,15 +612,14 @@ async function tryInvidiousInstance(
   const audioUrl = pickInvidiousAudio(data);
   if (!audioUrl) return { response: null, note: "sem-formato-audio" };
 
-  // Com local=false a URL deve ser proxiada pela instancia; com local=true
-  // aponta direto para o googlevideo. Verificamos se o proxy e real antes de tentar.
-  if (!local && !isProxiedUrl(base, audioUrl)) {
-    // Instancia nao esta proxiando — ignora e deixa cair no local=true
-    return { response: null, note: "nao-proxiado" };
-  }
-
+  // A instancia pode devolver uma URL direta do googlevideo (nao proxiada) ou uma
+  // URL proxiada por ela. As duas servem: o googlevideo entrega os bytes para
+  // qualquer IP, e a URL proxiada passa pelo companion da instancia.
+  const proxied = isProxiedUrl(base, audioUrl);
   const stream = await fetchInvidiousStream(base, audioUrl);
-  return stream ? { response: stream, note: "ok" } : { response: null, note: "stream-falhou" };
+  return stream
+    ? { response: stream, note: "ok" }
+    : { response: null, note: `${proxied ? "proxy" : "direto"}-stream-falhou` };
 }
 
 async function openInvidiousAudio(id: string): Promise<Response> {
