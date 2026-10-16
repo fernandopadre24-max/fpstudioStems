@@ -163,6 +163,9 @@ export default function App() {
   });
 
   const lyricsEngineRef = useRef<LyricsEngine | null>(null);
+  // Trilha escolhida para a partitura que ainda precisa ser separada; quando a
+  // separacao termina, a partitura e gerada automaticamente.
+  const pendingScoreRef = useRef<string | null>(null);
 
   const decodedRef = useRef<DecodedAudio | null>(null);
   decodedRef.current = decoded;
@@ -581,8 +584,10 @@ export default function App() {
     }
   }, [analysis, chords, decoded]);
 
-  // Fontes disponiveis para a partitura: as trilhas separadas (voz/instrumento)
-  // e, se houver, a musica original.
+  // Fontes disponiveis para a partitura: a voz principal e os instrumentos do
+  // preset escolhido (mesmo antes de separar) e, por ultimo, a musica original.
+  // As trilhas que ainda nao foram separadas aparecem marcadas e sao geradas
+  // sob demanda ao clicar em "Gerar partitura".
   const scoreSources = useMemo(() => {
     const priority: StemId[] = [
       "leadVocal",
@@ -590,23 +595,29 @@ export default function App() {
       "guitar",
       "piano",
       "other",
+      "otherHigh",
+      "otherLow",
       "bass",
+      "subBass",
       "backingVocal",
+      "percussion",
+      "drumHigh",
+      "drumLow",
       "drums",
     ];
-    const options: { id: string; label: string }[] = [];
-    const ordered = (results ?? []).slice().sort((a, b) => {
-      const ia = priority.indexOf(a.id);
-      const ib = priority.indexOf(b.id);
+    const ready = new Set((results ?? []).map((stem) => String(stem.id)));
+    const ordered = preset.stems.slice().sort((a, b) => {
+      const ia = priority.indexOf(a);
+      const ib = priority.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
     });
-    for (const stem of ordered) {
-      const meta = STEMS.find((item) => item.id === stem.id);
-      options.push({ id: stem.id, label: meta?.label ?? String(stem.id) });
-    }
+    const options: { id: string; label: string }[] = ordered.map((id) => {
+      const label = STEMS.find((item) => item.id === id)?.label ?? String(id);
+      return { id: String(id), label: ready.has(String(id)) ? label : `${label} — separar` };
+    });
     if (decoded) options.push({ id: "original", label: "Música original (mix)" });
     return options;
-  }, [decoded, results]);
+  }, [decoded, preset, results]);
 
   useEffect(() => {
     if (scoreSources.length === 0) return;
@@ -622,9 +633,32 @@ export default function App() {
 
   const scoreAbc = useMemo(() => (score ? buildAbc(score) : ""), [score]);
 
+  // A voz/instrumento escolhido para a partitura ainda precisa ser separado?
+  const scoreNeedsSeparation = useMemo(
+    () =>
+      scoreSource !== "" &&
+      scoreSource !== "original" &&
+      !(results ?? []).some((item) => String(item.id) === scoreSource),
+    [results, scoreSource],
+  );
+
   const generateScore = useCallback(async () => {
     if (!decoded) return;
     setScoreError(null);
+
+    // Trilha escolhida (voz principal ou instrumento) que ainda nao foi
+    // separada: dispara a separacao e retoma sozinho quando ela terminar.
+    const stem =
+      scoreSource === "original" ? null : results?.find((item) => item.id === scoreSource) ?? null;
+    if (scoreSource !== "original" && !stem) {
+      pendingScoreRef.current = scoreSource;
+      setScore(null);
+      setScoreStatus("working");
+      setScoreStep("Separando as trilhas...");
+      startSeparation();
+      return;
+    }
+
     setScore(null);
     setScoreStatus("working");
     setScoreStep("Extraindo a melodia...");
@@ -632,13 +666,11 @@ export default function App() {
       let left: Float32Array;
       let right: Float32Array;
       let instrumentLabel: string;
-      if (scoreSource === "original" || !results) {
+      if (!stem) {
         left = decoded.left;
         right = decoded.right;
         instrumentLabel = "Música original";
       } else {
-        const stem = results.find((item) => item.id === scoreSource);
-        if (!stem) throw new Error("Trilha não encontrada.");
         left = stem.left;
         right = stem.right;
         instrumentLabel = STEMS.find((item) => item.id === stem.id)?.label ?? String(stem.id);
@@ -678,7 +710,25 @@ export default function App() {
       setScoreStatus("idle");
       setScoreStep("");
     }
-  }, [analysis, baseName, chords, decoded, identity, results, scoreSource]);
+  }, [analysis, baseName, chords, decoded, identity, results, scoreSource, startSeparation]);
+
+  // Retoma a partitura pedida antes da separacao terminar.
+  useEffect(() => {
+    const pending = pendingScoreRef.current;
+    if (!pending) return;
+    if (results?.some((item) => item.id === pending)) {
+      pendingScoreRef.current = null;
+      void generateScore();
+      return;
+    }
+    // Separacao encerrou sem produzir a trilha (falhou ou foi cancelada).
+    if (phase === "ready" || phase === "idle") {
+      pendingScoreRef.current = null;
+      setScoreStatus("idle");
+      setScoreStep("");
+      setScoreError("Não foi possível separar essa trilha. Tente novamente.");
+    }
+  }, [generateScore, phase, results]);
 
   const downloadScoreXml = useCallback(() => {
     if (!score) return;
@@ -1451,8 +1501,9 @@ export default function App() {
             <div className="section-head">
               <h2>Partitura</h2>
               <p>
-                Transcreve a melodia de uma trilha (voz principal ou instrumento de solo) para um
-                pentagrama, com a harmonia (cifra) por cima. Roda inteiramente no seu navegador.
+                Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
+                cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
+                estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
               </p>
             </div>
 
@@ -1478,7 +1529,11 @@ export default function App() {
                 onClick={() => void generateScore()}
                 disabled={scoreStatus === "working" || scoreSources.length === 0}
               >
-                {scoreStatus === "working" ? "Gerando..." : "Gerar partitura"}
+                {scoreStatus === "working"
+                  ? "Gerando..."
+                  : scoreNeedsSeparation
+                    ? "Separar e gerar partitura"
+                    : "Gerar partitura"}
               </button>
 
               {score && (

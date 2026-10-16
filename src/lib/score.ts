@@ -428,20 +428,31 @@ export function buildAbc(score: Score): string {
   lines.push(`Q:1/4=${Math.round(score.bpm)}`);
   lines.push(`K:${score.keyLabel} clef=${score.clef}`);
 
-  for (const measure of score.measures) {
+  // O abcjs respeita as quebras de linha do ABC como quebras de pauta. Se cada
+  // compasso fosse para uma linha, cada um viraria um pentagrama proprio (sem
+  // barras internas). Agrupar alguns compassos por linha mantem a divisao
+  // visivel mesmo quando o renderizador nao reorganiza as linhas sozinho.
+  const measuresPerLine = 4;
+  const total = score.measures.length;
+  for (let start = 0; start < total; start += measuresPerLine) {
+    const chunk = score.measures.slice(start, start + measuresPerLine);
     const tokens: string[] = [];
-    for (const event of measure.events) {
-      const length = event.units === 1 ? "" : String(event.units);
-      if (event.kind === "rest") {
-        tokens.push(`z${length}`);
-        continue;
+    chunk.forEach((measure, index) => {
+      const measureTokens: string[] = [];
+      for (const event of measure.events) {
+        const length = event.units === 1 ? "" : String(event.units);
+        if (event.kind === "rest") {
+          measureTokens.push(`z${length}`);
+          continue;
+        }
+        const chordPrefix = event.chord ? `"${event.chord}"` : "";
+        const tie = event.tieStart ? "-" : "";
+        measureTokens.push(`${chordPrefix}${abcPitch(event)}${length}${tie}`);
       }
-      const chordPrefix = event.chord ? `"${event.chord}"` : "";
-      const tie = event.tieStart ? "-" : "";
-      tokens.push(`${chordPrefix}${abcPitch(event)}${length}${tie}`);
-    }
-    lines.push(tokens.join(" ") + " |");
+      const isLast = start + index === total - 1;
+      tokens.push(measureTokens.join(" ") + (isLast ? " |]" : " |"));
+    });
+    lines.push(tokens.join(" "));
   }
-  lines.push("]");
   return lines.join("\n");
 }
