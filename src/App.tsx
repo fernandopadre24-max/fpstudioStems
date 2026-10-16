@@ -21,14 +21,15 @@ import { cifraToText, fetchCifra, type CifraQuery, type CifraResult } from "./li
 import {
   DEFAULT_WHISPER_ID,
   getModel,
-  MODELS,
+  getPreset,
   SAMPLE_RATE,
+  STEM_PRESETS,
   STEMS,
   WHISPER_MODELS,
   WHISPER_BY_ID,
   type Backend,
   type StemId,
-  type StemModelId,
+  type StemPresetId,
 } from "./lib/constants";
 import {
   createZip,
@@ -110,9 +111,7 @@ export default function App() {
   const [sessionReason, setSessionReason] = useState<string | null>(null);
   const [separationProgress, setSeparationProgress] = useState<SeparationProgress | null>(null);
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
-  const [modelChoice, setModelChoice] = useState<StemModelId>("htdemucs");
-  const [splitPercussion, setSplitPercussion] = useState(false);
-  const [splitVocals, setSplitVocals] = useState(false);
+  const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
   const [separationNote, setSeparationNote] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<"mixer" | "original" | "instrumental" | null>(
     null,
@@ -298,10 +297,13 @@ export default function App() {
     };
   }, [applyResults]);
 
+  const preset = getPreset(presetChoice);
+  const model = getModel(preset.model);
+
   useEffect(() => {
     setModelStatus("unknown");
-    engineRef.current?.checkModel(modelChoice);
-  }, [modelChoice]);
+    engineRef.current?.checkModel(preset.model);
+  }, [preset.model]);
 
   useEffect(() => {
     if (!decoded) {
@@ -398,22 +400,14 @@ export default function App() {
     setActivePlayback(null);
     setSelection(null);
     setPhase("separating");
-    engineRef.current?.separate(
-      decoded.left,
-      decoded.right,
-      backendChoice,
-      modelChoice,
-      splitPercussion,
-      splitVocals,
-    );
-  }, [backendChoice, decoded, modelChoice, splitPercussion, splitVocals]);
+    engineRef.current?.separate(decoded.left, decoded.right, backendChoice, presetChoice);
+  }, [backendChoice, decoded, presetChoice]);
 
   const cancelSeparation = useCallback(() => {
     engineRef.current?.cancel();
   }, []);
 
   const baseName = file ? sanitizeBaseName(file.name) : "musica";
-  const model = getModel(modelChoice);
   const corte = rangeSamples ? " (corte)" : "";
   const ext = audioExtension(exportFormat);
 
@@ -1133,21 +1127,21 @@ export default function App() {
         {decoded && phase !== "decoding" && (
           <section className="panel controls-panel">
             <div className="section-head">
-              <h2>Separar em {model.stems.length} trilhas</h2>
+              <h2>Separar em {preset.stems.length} trilhas</h2>
               <p>
-                {model.description} O processamento acontece inteiramente na sua maquina.
+                {preset.description} O processamento acontece inteiramente na sua maquina.
               </p>
             </div>
 
             <div className="controls-row">
               <label className="field">
-                <span>Instrumentos</span>
+                <span>Trilhas</span>
                 <select
-                  value={modelChoice}
-                  onChange={(event) => setModelChoice(event.target.value as StemModelId)}
+                  value={presetChoice}
+                  onChange={(event) => setPresetChoice(event.target.value as StemPresetId)}
                   disabled={phase === "separating"}
                 >
-                  {MODELS.map((option) => (
+                  {STEM_PRESETS.map((option) => (
                     <option key={option.id} value={option.id}>
                       {option.label}
                     </option>
@@ -1177,32 +1171,6 @@ export default function App() {
                   <option value="wav">WAV (sem perdas)</option>
                   <option value="mp3">MP3 (192 kbps)</option>
                 </select>
-              </label>
-
-              <label
-                className="field-toggle"
-                title="Separa os ataques (percussão) do corpo/ressonância da bateria via HPSS. Experimental e adiciona tempo de processamento."
-              >
-                <input
-                  type="checkbox"
-                  checked={splitPercussion}
-                  onChange={(event) => setSplitPercussion(event.target.checked)}
-                  disabled={phase === "separating"}
-                />
-                <span>Separar percussão</span>
-              </label>
-
-              <label
-                className="field-toggle"
-                title="Divide a trilha de vocais em voz principal (lead) e backing/harmonia com o modelo UVR-MDX-NET KARA 2. Requer um download extra (~50 MB) na primeira vez."
-              >
-                <input
-                  type="checkbox"
-                  checked={splitVocals}
-                  onChange={(event) => setSplitVocals(event.target.checked)}
-                  disabled={phase === "separating"}
-                />
-                <span>Separar voz e backing</span>
               </label>
 
               {phase === "separating" ? (

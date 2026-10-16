@@ -1,4 +1,4 @@
-import type { Backend, StemId, StemModelId } from "./constants";
+import type { Backend, StemId, StemModelId, StemPresetId } from "./constants";
 
 export type WorkerRequest =
   | { type: "check-model"; model: StemModelId }
@@ -8,9 +8,7 @@ export type WorkerRequest =
       left: Float32Array;
       right: Float32Array;
       backend: Backend;
-      model: StemModelId;
-      splitPercussion?: boolean;
-      splitVocals?: boolean;
+      preset: StemPresetId;
     }
   | { type: "cancel" };
 

@@ -2,9 +2,15 @@ export const SAMPLE_RATE = 44100;
 
 export type StemId =
   | "drums"
+  | "drumLow"
+  | "drumHigh"
   | "percussion"
   | "bass"
+  | "subBass"
   | "other"
+  | "otherLow"
+  | "otherHigh"
+  | "otherPerc"
   | "vocals"
   | "leadVocal"
   | "backingVocal"
@@ -26,6 +32,18 @@ export const STEMS: StemMeta[] = [
     color: "#ff7a59",
   },
   {
+    id: "drumLow",
+    label: "Bumbo e caixa",
+    description: "Parte grave da bateria (aproximado)",
+    color: "#ef4444",
+  },
+  {
+    id: "drumHigh",
+    label: "Pratos e hats",
+    description: "Parte aguda da bateria (aproximado)",
+    color: "#fb923c",
+  },
+  {
     id: "percussion",
     label: "Percussão",
     description: "Ataques separados da bateria (experimental)",
@@ -38,10 +56,34 @@ export const STEMS: StemMeta[] = [
     color: "#4cc9f0",
   },
   {
+    id: "subBass",
+    label: "Sub-baixo",
+    description: "Graves do baixo (sub/sintetizador)",
+    color: "#2563eb",
+  },
+  {
     id: "other",
     label: "Outros",
     description: "Teclados, cordas e demais instrumentos",
     color: "#b892ff",
+  },
+  {
+    id: "otherLow",
+    label: "Outros (graves)",
+    description: "Instrumentos graves dentro dos outros (aproximado)",
+    color: "#a78bfa",
+  },
+  {
+    id: "otherHigh",
+    label: "Outros (agudos)",
+    description: "Instrumentos agudos dentro dos outros (aproximado)",
+    color: "#d8b4fe",
+  },
+  {
+    id: "otherPerc",
+    label: "Outros (percussivo)",
+    description: "Ataques e percussao dentro dos outros (experimental)",
+    color: "#c084fc",
   },
   {
     id: "vocals",
@@ -115,6 +157,136 @@ export function getModel(id: StemModelId): StemModelMeta {
   const model = MODEL_BY_ID.get(id);
   if (!model) throw new Error(`Modelo desconhecido: ${id}`);
   return model;
+}
+
+// Presets de separacao: definem quantas e quais trilhas saem, combinando o
+// modelo base (Demucs) com estagios extras (percussao, voz/backing) e divisoes
+// por faixa de frequencia. As trilhas extras sao aproximadas (DSP), mas somam de
+// volta ao original.
+export type StemPresetId = "4" | "6" | "8" | "10" | "12";
+
+export interface StemPreset {
+  id: StemPresetId;
+  label: string;
+  description: string;
+  model: StemModelId;
+  /** Divide a bateria em percussao (ataques) + ressonancia via HPSS. */
+  percussion: boolean;
+  /** Divide os vocais em voz principal + backing (modelo KARA 2). */
+  vocals: boolean;
+  /** Divide o baixo em sub-baixo (graves) + baixo. */
+  bassBands: boolean;
+  /** Separa a parte percussiva dos "outros" (ataques/efeitos). */
+  otherPerc: boolean;
+  /** Divide os "outros" harmonicos em graves/agudos. */
+  otherBands: boolean;
+  /** Divide a bateria (parte percussiva) em bumbo/caixa e pratos/hats. */
+  drumBands: boolean;
+  /** Trilhas na ordem em que aparecem no editor. */
+  stems: StemId[];
+}
+
+export const STEM_PRESETS: StemPreset[] = [
+  {
+    id: "4",
+    label: "4 trilhas — HT-Demucs",
+    description: "Bateria, baixo, outros e vocais. Mais rapido.",
+    model: "htdemucs",
+    percussion: false,
+    vocals: false,
+    bassBands: false,
+    otherPerc: false,
+    otherBands: false,
+    drumBands: false,
+    stems: ["drums", "bass", "other", "vocals"],
+  },
+  {
+    id: "6",
+    label: "6 trilhas — HT-Demucs 6s",
+    description: "Adiciona guitarra e piano as 4 trilhas padrao.",
+    model: "htdemucs_6s",
+    percussion: false,
+    vocals: false,
+    bassBands: false,
+    otherPerc: false,
+    otherBands: false,
+    drumBands: false,
+    stems: ["drums", "bass", "other", "vocals", "guitar", "piano"],
+  },
+  {
+    id: "8",
+    label: "8 trilhas — detalhado",
+    description: "6 instrumentos + percussao da bateria + voz principal e backing.",
+    model: "htdemucs_6s",
+    percussion: true,
+    vocals: true,
+    bassBands: false,
+    otherPerc: false,
+    otherBands: false,
+    drumBands: false,
+    stems: ["drums", "percussion", "bass", "other", "guitar", "piano", "leadVocal", "backingVocal"],
+  },
+  {
+    id: "10",
+    label: "10 trilhas — avancado",
+    description: "8 trilhas + sub-baixo + parte percussiva dos outros instrumentos.",
+    model: "htdemucs_6s",
+    percussion: true,
+    vocals: true,
+    bassBands: true,
+    otherPerc: true,
+    otherBands: false,
+    drumBands: false,
+    stems: [
+      "drums",
+      "percussion",
+      "subBass",
+      "bass",
+      "other",
+      "otherPerc",
+      "guitar",
+      "piano",
+      "leadVocal",
+      "backingVocal",
+    ],
+  },
+  {
+    id: "12",
+    label: "12 trilhas — maximo",
+    description:
+      "10 trilhas + bumbo/caixa e pratos/hats separados + outros divididos por faixa de frequencia.",
+    model: "htdemucs_6s",
+    percussion: true,
+    vocals: true,
+    bassBands: true,
+    otherPerc: true,
+    otherBands: true,
+    drumBands: true,
+    stems: [
+      "drumLow",
+      "drumHigh",
+      "percussion",
+      "subBass",
+      "bass",
+      "otherLow",
+      "otherHigh",
+      "otherPerc",
+      "guitar",
+      "piano",
+      "leadVocal",
+      "backingVocal",
+    ],
+  },
+];
+
+export const PRESET_BY_ID = new Map<StemPresetId, StemPreset>(
+  STEM_PRESETS.map((preset) => [preset.id, preset]),
+);
+
+export function getPreset(id: StemPresetId): StemPreset {
+  const preset = PRESET_BY_ID.get(id);
+  if (!preset) throw new Error(`Preset desconhecido: ${id}`);
+  return preset;
 }
 
 export interface ModelAsset {

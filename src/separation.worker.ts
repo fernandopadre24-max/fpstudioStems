@@ -2,12 +2,16 @@ import * as ort from "onnxruntime-web";
 import {
   BACKING_VOCAL_MODEL,
   getModel,
+  getPreset,
   SAMPLE_RATE,
   type Backend,
   type ModelAsset,
+  type StemId,
   type StemModelMeta,
+  type StemPreset,
 } from "./lib/constants";
 import { separateDrumsPercussion } from "./lib/hpss";
+import { BASS_CUTOFF, DRUM_CUTOFF, OTHER_CUTOFF, splitBands } from "./lib/bands";
 import { KARA_DIM_F, KARA_FRAMES, separateLeadBacking } from "./lib/leadBacking";
 import type { StemResultPayload, WorkerRequest, WorkerResponse } from "./lib/protocol";
 
@@ -299,18 +303,17 @@ async function separate(
   left: Float32Array,
   right: Float32Array,
   backend: Backend,
-  model: StemModelMeta,
-  splitPercussion: boolean,
-  splitVocals: boolean,
+  preset: StemPreset,
 ): Promise<void> {
   cancelled = false;
   if (backend === "webgpu") webgpuUsable = true;
 
+  const model = getModel(preset.model);
   let used: "webgpu" | "wasm" = "wasm";
   try {
     const handle = await getSession(model, backend);
     used = handle.backend;
-    await separateWithSession(handle.session, left, right, model, splitPercussion, splitVocals, used);
+    await separateWithSession(handle.session, left, right, model, preset, used);
   } catch (error) {
     if (cancelled) {
       post({ type: "cancelled" });
@@ -327,15 +330,7 @@ async function separate(
       reason: describeError(error),
     });
     const handle = await getSession(model, "wasm");
-    await separateWithSession(
-      handle.session,
-      left,
-      right,
-      model,
-      splitPercussion,
-      splitVocals,
-      "wasm",
-    );
+    await separateWithSession(handle.session, left, right, model, preset, "wasm");
   }
 }
 
@@ -358,8 +353,7 @@ async function separateWithSession(
   left: Float32Array,
   right: Float32Array,
   model: StemModelMeta,
-  splitPercussion: boolean,
-  splitVocals: boolean,
+  preset: StemPreset,
   backend: "webgpu" | "wasm",
 ): Promise<void> {
   const startedAt = performance.now();
@@ -417,71 +411,117 @@ async function separateWithSession(
     }
   }
 
-  const payloads: StemResultPayload[] = [];
-  for (let index = 0; index < model.stems.length; index++) {
-    const id = model.stems[index];
-    if (splitPercussion && id === "drums") {
-      post({ type: "separation-note", message: "Separando percussão da bateria (HPSS)..." });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      const split = separateDrumsPercussion(outs[index][0], outs[index][1]);
-      payloads.push({
-        id: "drums",
-        left: split.percussiveLeft.buffer as ArrayBuffer,
-        right: split.percussiveRight.buffer as ArrayBuffer,
-      });
-      payloads.push({
-        id: "percussion",
-        left: split.harmonicLeft.buffer as ArrayBuffer,
-        right: split.harmonicRight.buffer as ArrayBuffer,
-      });
-    } else if (splitVocals && id === "vocals") {
+  // Monta o mapa de trilhas: comeca com o que o modelo devolveu e aplica os
+  // estagios extras do preset. Cada estagio PARTICIONA um stem (a soma das
+  // partes continua igual ao original), entao nada e contado em dobro.
+  const produced = new Map<StemId, [Float32Array, Float32Array]>();
+  for (let i = 0; i < model.stems.length; i++) {
+    produced.set(model.stems[i], [outs[i][0], outs[i][1]]);
+  }
+  const get = (id: StemId): [Float32Array, Float32Array] | null => produced.get(id) ?? null;
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  // Bateria -> percussao (ataques) + ressonancia (HPSS).
+  const drums = get("drums");
+  if (preset.percussion && drums) {
+    post({ type: "separation-note", message: "Separando percussão da bateria (HPSS)..." });
+    await pause();
+    const split = separateDrumsPercussion(drums[0], drums[1]);
+    produced.set("drums", [split.percussiveLeft, split.percussiveRight]);
+    produced.set("percussion", [split.harmonicLeft, split.harmonicRight]);
+  }
+
+  // Bateria percussiva -> bumbo/caixa (graves) + pratos/hats (agudos).
+  if (preset.drumBands) {
+    const percussive = get("drums");
+    if (percussive) {
+      post({ type: "separation-note", message: "Separando bumbo/caixa dos pratos..." });
+      await pause();
+      const split = splitBands(percussive[0], percussive[1], DRUM_CUTOFF);
+      produced.set("drumLow", [split.lowLeft, split.lowRight]);
+      produced.set("drumHigh", [split.highLeft, split.highRight]);
+    }
+  }
+
+  // Vocais -> voz principal + backing (modelo UVR-MDX-NET KARA 2).
+  const vocals = get("vocals");
+  if (preset.vocals && vocals) {
+    post({
+      type: "separation-note",
+      message: "Separando voz principal do backing (modelo extra)...",
+    });
+    await pause();
+    let karaSession: ort.InferenceSession | null = null;
+    try {
+      karaSession = (await getSession(BACKING_VOCAL_MODEL, backend, false)).session;
+    } catch (error) {
       post({
         type: "separation-note",
-        message: "Separando voz principal do backing (modelo extra)...",
+        message: `Nao foi possivel carregar o modelo de voz/backing: ${describeError(error)}`,
       });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      let karaSession: ort.InferenceSession | null = null;
-      try {
-        karaSession = (await getSession(BACKING_VOCAL_MODEL, backend, false)).session;
-      } catch (error) {
-        post({
-          type: "separation-note",
-          message: `Nao foi possivel carregar o modelo de voz/backing: ${describeError(error)}`,
-        });
-      }
-      const active = karaSession;
-      if (active) {
-        const split = await separateLeadBacking(
-          outs[index][0],
-          outs[index][1],
-          (spectrum) => runKaraChunk(active, spectrum),
-          (done, totalChunks) =>
-            post({
-              type: "separation-note",
-              message: `Separando voz e backing... bloco ${done} de ${totalChunks}`,
-            }),
-          () => cancelled,
-        );
-        if (cancelled) {
-          post({ type: "cancelled" });
-          return;
-        }
-        payloads.push({
-          id: "leadVocal",
-          left: split.leadLeft.buffer as ArrayBuffer,
-          right: split.leadRight.buffer as ArrayBuffer,
-        });
-        payloads.push({
-          id: "backingVocal",
-          left: split.backingLeft.buffer as ArrayBuffer,
-          right: split.backingRight.buffer as ArrayBuffer,
-        });
-      } else {
-        payloads.push({ id, left: outs[index][0].buffer, right: outs[index][1].buffer });
-      }
-    } else {
-      payloads.push({ id, left: outs[index][0].buffer, right: outs[index][1].buffer });
     }
+    if (karaSession) {
+      const active = karaSession;
+      const split = await separateLeadBacking(
+        vocals[0],
+        vocals[1],
+        (spectrum) => runKaraChunk(active, spectrum),
+        (done, totalChunks) =>
+          post({
+            type: "separation-note",
+            message: `Separando voz e backing... bloco ${done} de ${totalChunks}`,
+          }),
+        () => cancelled,
+      );
+      if (cancelled) {
+        post({ type: "cancelled" });
+        return;
+      }
+      produced.set("leadVocal", [split.leadLeft, split.leadRight]);
+      produced.set("backingVocal", [split.backingLeft, split.backingRight]);
+    }
+  }
+
+  // Baixo -> sub-baixo (graves) + baixo (resto).
+  const bass = get("bass");
+  if (preset.bassBands && bass) {
+    const split = splitBands(bass[0], bass[1], BASS_CUTOFF);
+    produced.set("subBass", [split.lowLeft, split.lowRight]);
+    produced.set("bass", [split.highLeft, split.highRight]);
+  }
+
+  // Outros -> harmonicos + percussivos (HPSS).
+  const other = get("other");
+  if (preset.otherPerc && other) {
+    post({
+      type: "separation-note",
+      message: "Separando a percussão dos outros instrumentos (HPSS)...",
+    });
+    await pause();
+    const split = separateDrumsPercussion(other[0], other[1]);
+    produced.set("other", [split.harmonicLeft, split.harmonicRight]);
+    produced.set("otherPerc", [split.percussiveLeft, split.percussiveRight]);
+  }
+
+  // Outros harmonicos -> graves + agudos.
+  if (preset.otherBands) {
+    const harmonic = get("other");
+    if (harmonic) {
+      const split = splitBands(harmonic[0], harmonic[1], OTHER_CUTOFF);
+      produced.set("otherLow", [split.lowLeft, split.lowRight]);
+      produced.set("otherHigh", [split.highLeft, split.highRight]);
+    }
+  }
+
+  const payloads: StemResultPayload[] = [];
+  for (const id of preset.stems) {
+    const stem = produced.get(id);
+    if (!stem) continue;
+    payloads.push({
+      id,
+      left: stem[0].buffer as ArrayBuffer,
+      right: stem[1].buffer as ArrayBuffer,
+    });
   }
 
   post(
@@ -514,14 +554,7 @@ ctx.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     }
 
     if (message.type === "separate") {
-      await separate(
-        message.left,
-        message.right,
-        message.backend,
-        getModel(message.model),
-        message.splitPercussion ?? false,
-        message.splitVocals ?? false,
-      );
+      await separate(message.left, message.right, message.backend, getPreset(message.preset));
     }
   } catch (error) {
     post({
