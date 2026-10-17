@@ -2125,9 +2125,17 @@ body {
 }
 
 .voice-gallery {
-  max-height: 430px;
+  /* Os grupos sao cartoes que se acomodam lado a lado, entao a largura da tela
+     toda e aproveitada em vez de sobrar espaco a direita de cada linha. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  /* Acompanha a altura da janela: mais espaco em tela grande, sem virar um
+     paredao em tela pequena. */
+  max-height: clamp(320px, 58vh, 620px);
   overflow-y: auto;
-  padding: 2px 6px 8px 4px;
+  padding: 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.02);
@@ -2147,31 +2155,47 @@ body {
   text-underline-offset: 2px;
 }
 
+.voice-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
 .voice-group h4 {
-  margin: 12px 0 6px;
-  font-size: 11.5px;
+  /* Estreito de proposito: o rotulo divide a linha com as fotos. */
+  margin: 0;
+  max-width: 84px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .voice-faces {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .voice-face {
   position: relative;
-  width: 96px;
-  flex: 0 0 auto;
+  width: 88px;
+}
+
+.voice-face-shot {
+  position: relative;
 }
 
 .voice-face-pick {
   display: block;
-  width: 96px;
-  height: 96px;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 12px;
@@ -2209,7 +2233,8 @@ body {
 .voice-face-play {
   position: absolute;
   left: 50%;
-  top: 48px;
+  /* Ancorado no quadrado da foto (voice-face-shot), nao no cartao inteiro. */
+  top: 50%;
   transform: translate(-50%, -50%);
   width: 40px;
   height: 40px;
@@ -2237,6 +2262,27 @@ body {
   .voice-face-play {
     opacity: 1;
     pointer-events: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .voice-face {
+    width: 76px;
+  }
+
+  .voice-group {
+    gap: 6px;
+    padding: 5px 8px 5px 6px;
+  }
+
+  .voice-group h4 {
+    max-width: 62px;
+    font-size: 10px;
+  }
+
+  .voice-gallery {
+    gap: 8px;
+    max-height: clamp(260px, 52vh, 460px);
   }
 }
 

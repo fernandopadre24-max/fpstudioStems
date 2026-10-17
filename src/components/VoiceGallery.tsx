@@ -34,42 +34,44 @@ export function VoiceGallery({ profileId, onSelect, disabled, onDemo, stateOf }:
               const label = state === "playing" ? "Parar exemplo" : "Ouvir exemplo";
               return (
                 <div className={`voice-face${selected ? " is-selected" : ""}`} key={profile.id}>
-                  <button
-                    type="button"
-                    className="voice-face-pick"
-                    onClick={() => onSelect(profile.id)}
-                    disabled={disabled}
-                    title={`${profile.label} — ${profile.hint}`}
-                    aria-pressed={selected}
-                  >
-                    {avatar ? (
-                      <img
-                        src={avatar}
-                        alt={profile.label}
-                        width={256}
-                        height={256}
-                        decoding="async"
-                      />
-                    ) : (
-                      <span className="voice-face-empty">{shortLabel(profile)}</span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className="voice-face-play"
-                    onClick={() => onDemo(profile.id)}
-                    disabled={disabled}
-                    title={label}
-                    aria-label={`${label} — ${profile.label}`}
-                  >
-                    {state === "loading" ? (
-                      <span className="voice-face-spin" />
-                    ) : state === "playing" ? (
-                      <PauseIcon />
-                    ) : (
-                      <PlayIcon />
-                    )}
-                  </button>
+                  <div className="voice-face-shot">
+                    <button
+                      type="button"
+                      className="voice-face-pick"
+                      onClick={() => onSelect(profile.id)}
+                      disabled={disabled}
+                      title={`${profile.label} — ${profile.hint}`}
+                      aria-pressed={selected}
+                    >
+                      {avatar ? (
+                        <img
+                          src={avatar}
+                          alt={profile.label}
+                          width={256}
+                          height={256}
+                          decoding="async"
+                        />
+                      ) : (
+                        <span className="voice-face-empty">{shortLabel(profile)}</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="voice-face-play"
+                      onClick={() => onDemo(profile.id)}
+                      disabled={disabled}
+                      title={label}
+                      aria-label={`${label} — ${profile.label}`}
+                    >
+                      {state === "loading" ? (
+                        <span className="voice-face-spin" />
+                      ) : state === "playing" ? (
+                        <PauseIcon />
+                      ) : (
+                        <PlayIcon />
+                      )}
+                    </button>
+                  </div>
                   <span className="voice-face-name">{shortLabel(profile)}</span>
                 </div>
               );
