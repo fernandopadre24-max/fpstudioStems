@@ -2072,6 +2072,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-top: 16px;
   padding: 14px 16px;
   border: 1px dashed var(--line);
   border-radius: 12px;
@@ -2112,17 +2113,149 @@ body {
   margin-left: auto;
 }
 
-.voice-grid {
+.voice-pick {
+  margin-top: 16px;
+}
+
+.voice-pick-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.voice-gallery {
+  max-height: 430px;
+  overflow-y: auto;
+  padding: 2px 6px 8px 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.voice-group h4 {
+  margin: 12px 0 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.voice-faces {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 14px;
-  margin-top: 14px;
+  gap: 8px;
+}
+
+.voice-face {
+  position: relative;
+  width: 96px;
+  flex: 0 0 auto;
+}
+
+.voice-face-pick {
+  display: block;
+  width: 96px;
+  height: 96px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+
+.voice-face-pick img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.voice-face-pick:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.voice-face-empty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.voice-face.is-selected .voice-face-pick {
+  border-color: #ff9ecd;
+  box-shadow: 0 0 0 3px rgba(255, 158, 205, 0.22);
+}
+
+.voice-face-play {
+  position: absolute;
+  left: 50%;
+  top: 48px;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(12, 10, 20, 0.68);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  /* Invisivel tambem nao pode capturar o clique: quem escolhe e a foto. */
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.voice-face:hover .voice-face-play,
+.voice-face.is-selected .voice-face-play,
+.voice-face-play:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .voice-face-play {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.voice-face-spin {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: voice-spin 0.7s linear infinite;
+}
+
+@keyframes voice-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.voice-face-name {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  text-align: center;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .voice-outlook {
   flex: 1 1 260px;
   min-width: 220px;
+  margin-top: 16px;
 }
 
 .voice-hint {
@@ -2135,6 +2268,18 @@ body {
   margin: 0;
   font-size: 12.5px;
   color: var(--muted);
+}
+
+.voice-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.voice-key {
+  margin-top: 14px;
 }
 
 .voice-sliders {

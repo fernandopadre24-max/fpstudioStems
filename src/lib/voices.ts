@@ -453,6 +453,12 @@ export interface VoiceTweaks {
   semitones?: number;
   /** Ajuste fino dos formantes (-0,3 a +0,3 = -30% a +30%). */
   formant?: number;
+  /**
+   * Mantem a tonalidade da musica: o tom so muda em oitavas (ou nada), entao a
+   * voz troca de registro sem sair do tom. Desligado, vai para o registro do
+   * perfil em semitons inteiros.
+   */
+  keepKey?: boolean;
 }
 
 /**
@@ -461,6 +467,11 @@ export interface VoiceTweaks {
  * tessitura alvo e a medida, e os formantes sao a razao entre a escala do trato
  * alvo e a escala estimada pela tessitura da origem. A intensidade interpola em
  * escala logaritmica (pitch/formantes), que e como o ouvido percebe.
+ *
+ * O deslocamento de tom e sempre arredondado para semitons inteiros: um
+ * deslocamento quebrado (tipo +10,5 st) deixa a voz desafinada em relacao a
+ * musica. Com keepKey, arredonda para a oitava mais proxima: a voz muda de
+ * registro mas continua no mesmo tom.
  */
 export function resolveVoicePlan(
   profile: VoiceProfile,
@@ -480,14 +491,20 @@ export function resolveVoicePlan(
         : 0.94
     : profile.formant;
 
-  let pitchRatio = clamp(profile.f0 / sourceF0, 0.55, 1.9);
-  pitchRatio *= Math.pow(2, (tweaks.semitones ?? 0) / 12);
+  const wanted = clamp(
+    12 * Math.log2(profile.f0 / sourceF0) + clamp(tweaks.semitones ?? 0, -12, 12),
+    -12,
+    12,
+  );
+  const shifted = clamp(wanted * intensity, -12, 12);
+  const semitones = tweaks.keepKey ? 12 * Math.round(shifted / 12) : Math.round(shifted);
+  const pitchRatio = Math.pow(2, semitones / 12);
 
   let formantRatio = clamp(profile.formant / sourceFormant, 0.78, 1.28);
   formantRatio *= 1 + clamp(tweaks.formant ?? 0, -0.3, 0.3);
 
   return {
-    pitchRatio: Math.pow(pitchRatio, intensity),
+    pitchRatio,
     formantRatio: Math.pow(formantRatio, intensity),
     tiltDelta: clamp(profile.brightness, -4, 4) * intensity,
     vibratoCents: profile.vibratoCents * intensity,

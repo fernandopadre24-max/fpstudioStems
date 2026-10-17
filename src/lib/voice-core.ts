@@ -16,6 +16,13 @@ export const VOICE_HOP = 512;
 const CEPSTRUM_CUT = 100;
 const TILT_LOW_HZ = 150;
 const TILT_HIGH_HZ = 8000;
+/**
+ * Cruzamento para as sibilantes/consoantes: acima disto o som nao vem do trato
+ * vocal (vem dos dentes, lingua e labios) e nao deve subir junto com o tom —
+ * senao os "S" viram assobio de helio. O corte e complementar, entao a soma das
+ * duas bandas devolve o sinal original exatamente.
+ */
+const SIBILANCE_HZ = 6500;
 
 export type VoiceSex = "feminina" | "masculina" | "media";
 
@@ -409,16 +416,16 @@ function morphChannel(
       ? Math.pow(2, (plan.vibratoCents * Math.sin(wrap * plan.vibratoHz * seconds)) / 1200)
       : 1;
     const breathe = breathOn && rms > noiseGate;
+    if (f === 0) {
+      for (let k = 0; k <= half; k++) accumulated[k] = phase[k];
+    } else {
+      for (let k = 0; k <= half; k++) {
+        accumulated[k] += advance * interpolate(frequency, k) * vibrato;
+      }
+    }
     for (let k = 0; k <= half; k++) {
       const level = magnitude[k] * gain[k];
-      let angle: number;
-      if (f === 0) {
-        angle = phase[k];
-        accumulated[k] = angle;
-      } else {
-        accumulated[k] += advance * interpolate(frequency, k) * vibrato;
-        angle = accumulated[k];
-      }
+      const angle = accumulated[k];
       let r = level * Math.cos(angle);
       let i = level * Math.sin(angle);
       if (breathe) {
@@ -467,14 +474,24 @@ function morphChannel(
     stretched[stretched.length - 1 - i] *= ramp;
   }
 
-  // Reamostragem por r: sobe o pitch e devolve a duracao original.
+  // Reamostragem por r: sobe o pitch e devolve a duracao original. Hermite
+  // cubica no lugar da linear: a linear funciona como um passa-baixas e come os
+  // agudos da voz a cada salto de oitava.
   const out = new Float32Array(total);
+  const last = stretched.length - 1;
   for (let i = 0; i < total; i++) {
     const position = i * pitch;
     const base = Math.floor(position);
-    if (base + 1 >= stretched.length) break;
+    if (base + 2 >= stretched.length) break;
     const frac = position - base;
-    out[i] = stretched[base] * (1 - frac) + stretched[base + 1] * frac;
+    const y0 = stretched[base > 0 ? base - 1 : 0];
+    const y1 = stretched[base];
+    const y2 = stretched[base + 1];
+    const y3 = stretched[base + 2 < last ? base + 2 : last];
+    const a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
+    const a1 = y0 - 2.5 * y1 + 2 * y2 - 0.5 * y3;
+    const a2 = -0.5 * y0 + 0.5 * y2;
+    out[i] = ((a0 * frac + a1) * frac + a2) * frac + y1;
   }
   return out;
 }
@@ -611,9 +628,60 @@ export function morphVoice(
     side[i] = (left[i] - right[i]) * 0.5;
   }
 
+  // Separa o que vem do trato vocal (muda com o tom) do que vem da boca/dentes
+  // (sibilantes, que nao mudam de frequencia quando a voz troca de registro).
+  // O filtro roda nos dois sentidos (fase zero): sem isso o atraso de grupo
+  // atrapalha a conta do complemento e sobra um resto audivel da voz antiga na
+  // frequencia original. Em troca a resposta fica ao quadrado, entao o corte e
+  // um pouco mais baixo. O complemento e a diferenca, entao a soma das bandas
+  // devolve o sinal original exatamente.
+  const k = Math.tan((Math.PI * SIBILANCE_HZ) / (sampleRate * 1.1));
+  const sections = [0.5411961, 1.306563].map((q) => {
+    const a0 = 1 + k / q + k * k;
+    return {
+      b0: (k * k) / a0,
+      b1: (2 * k * k) / a0,
+      b2: (k * k) / a0,
+      a1: (2 * (k * k - 1)) / a0,
+      a2: (1 - k / q + k * k) / a0,
+    };
+  });
+  const low = mid.slice();
+  const high = new Float32Array(total);
+  for (const { b0, b1, b2, a1, a2 } of sections) {
+    let x1 = 0;
+    let x2 = 0;
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < total; i++) {
+      const x = low[i];
+      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = y;
+      low[i] = y;
+    }
+    x1 = 0;
+    x2 = 0;
+    y1 = 0;
+    y2 = 0;
+    for (let i = total - 1; i >= 0; i--) {
+      const x = low[i];
+      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = y;
+      low[i] = y;
+    }
+  }
+  for (let i = 0; i < total; i++) high[i] = mid[i] - low[i];
+
   const morphed = isIdentityPlan(plan)
-    ? mid.slice()
-    : morphChannel(mid, plan, stats, sampleRate, onProgress, isCancelled);
+    ? low
+    : morphChannel(low, plan, stats, sampleRate, onProgress, isCancelled);
+  for (let i = 0; i < total; i++) morphed[i] += high[i];
 
   const outLeft = new Float32Array(total);
   const outRight = new Float32Array(total);

@@ -6,6 +6,7 @@ import { Editor, type Selection } from "./components/Editor";
 import { SupportCard } from "./components/SupportCard";
 import { YouTubeSearch } from "./components/YouTubeSearch";
 import { useMixer, type MixerTrack } from "./hooks/useMixer";
+import { useVoiceDemo } from "./hooks/useVoiceDemo";
 import {
   audioExtension,
   computePeaks,
@@ -129,7 +130,7 @@ export default function App() {
   const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
   const [separationNote, setSeparationNote] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<
-    "mixer" | "original" | "instrumental" | "voicePreview" | null
+    "mixer" | "original" | "instrumental" | "voicePreview" | "voiceDemo" | null
   >(null);
   const [zipState, setZipState] = useState<"idle" | "working">("idle");
   const [gpuBlocked, setGpuBlocked] = useState<boolean>(readGpuBlocked);
@@ -162,6 +163,7 @@ export default function App() {
   const [voiceIntensity, setVoiceIntensity] = useState(1);
   const [voiceSemitones, setVoiceSemitones] = useState(0);
   const [voiceFormant, setVoiceFormant] = useState(0);
+  const [voiceKeepKey, setVoiceKeepKey] = useState(true);
   const [voiceStats, setVoiceStats] = useState<VoiceStats | null>(null);
   const [voiceMeasuring, setVoiceMeasuring] = useState(false);
   const [voiceMeasureKey, setVoiceMeasureKey] = useState(0);
@@ -175,6 +177,19 @@ export default function App() {
     label: string;
   } | null>(null);
   const [voicePreview, setVoicePreview] = useState<VoicePreview | null>(null);
+  const activateVoiceDemo = useCallback(() => setActivePlayback("voiceDemo"), []);
+  // Previa de timbre da galeria: sintetiza o exemplo e transforma na hora, com
+  // os mesmos ajustes que serao aplicados na musica.
+  const voiceDemo = useVoiceDemo(
+    {
+      intensity: voiceIntensity,
+      semitones: voiceSemitones,
+      formant: voiceFormant,
+      keepKey: voiceKeepKey,
+    },
+    activePlayback === "voiceDemo",
+    activateVoiceDemo,
+  );
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const saved = localStorage.getItem("stemroller.theme");
@@ -550,6 +565,7 @@ export default function App() {
           intensity: voiceIntensity,
           semitones: voiceSemitones,
           formant: voiceFormant,
+          keepKey: voiceKeepKey,
         });
         const window =
           target === "preview"
@@ -588,7 +604,7 @@ export default function App() {
         setVoiceProgress(null);
       }
     },
-    [voiceFormant, voiceIntensity, voiceProfileId, voiceSemitones, voiceSource, voiceStats],
+    [voiceFormant, voiceIntensity, voiceKeepKey, voiceProfileId, voiceSemitones, voiceSource, voiceStats],
   );
 
   const cancelVoice = useCallback(() => {
@@ -1663,6 +1679,11 @@ export default function App() {
             onSemitones={setVoiceSemitones}
             formant={voiceFormant}
             onFormant={setVoiceFormant}
+            keepKey={voiceKeepKey}
+            onKeepKey={setVoiceKeepKey}
+            onDemo={voiceDemo.play}
+            demoStateOf={voiceDemo.stateOf}
+            demoError={voiceDemo.error}
             preview={voicePreview}
             active={activePlayback === "voicePreview"}
             onActivate={() => setActivePlayback("voicePreview")}

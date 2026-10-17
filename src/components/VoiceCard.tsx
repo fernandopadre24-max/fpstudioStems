@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useSimplePlayer } from "../hooks/useSimplePlayer";
+import type { VoiceDemoState } from "../hooks/useVoiceDemo";
 import { formatTime } from "../lib/audio";
 import type { VoiceStats } from "../lib/voice-core";
-import { describeVoiceStats, getVoiceProfile, resolveVoicePlan, voiceGroups } from "../lib/voices";
+import { describeVoiceStats, getVoiceProfile, resolveVoicePlan } from "../lib/voices";
 import { DownloadIcon, PauseIcon, PlayIcon } from "./Cards";
+import { VoiceGallery } from "./VoiceGallery";
 import { Waveform } from "./Waveform";
 
 export interface VoicePreview {
@@ -27,6 +29,12 @@ interface VoiceCardProps {
   onSemitones: (value: number) => void;
   formant: number;
   onFormant: (value: number) => void;
+  keepKey: boolean;
+  onKeepKey: (value: boolean) => void;
+  /** Toca (ou para) o trecho de exemplo com o timbre de um perfil. */
+  onDemo: (id: string) => void;
+  demoStateOf: (id: string) => VoiceDemoState;
+  demoError: string | null;
   preview: VoicePreview | null;
   active: boolean;
   onActivate: () => void;
@@ -59,6 +67,11 @@ export function VoiceCard({
   onSemitones,
   formant,
   onFormant,
+  keepKey,
+  onKeepKey,
+  onDemo,
+  demoStateOf,
+  demoError,
   preview,
   active,
   onActivate,
@@ -71,7 +84,6 @@ export function VoiceCard({
   onSeparate,
 }: VoiceCardProps) {
   const profile = getVoiceProfile(profileId);
-  const groups = useMemo(() => voiceGroups(), []);
   const player = useSimplePlayer(preview?.buffer ?? null, active, onActivate);
   const played = player.duration > 0 ? player.position / player.duration : 0;
   const busy = status === "working";
@@ -94,6 +106,7 @@ export function VoiceCard({
       intensity,
       semitones,
       formant,
+      keepKey,
     });
     const semis = 12 * Math.log2(plan.pitchRatio);
     return {
@@ -101,7 +114,7 @@ export function VoiceCard({
       formantPercent: (plan.formantRatio - 1) * 100,
       target: profile.f0,
     };
-  }, [profile, stats, intensity, semitones, formant]);
+  }, [profile, stats, intensity, semitones, formant, keepKey]);
 
   return (
     <section className="panel voice-panel">
@@ -114,11 +127,25 @@ export function VoiceCard({
         </p>
       </div>
 
+      <div className="voice-pick">
+        <span className="voice-pick-label">
+          Tipo de voz (por estilo) — passe o mouse e toque no play para ouvir o timbre num trecho de
+          exemplo
+        </span>
+        <VoiceGallery
+          profileId={profileId}
+          onSelect={onProfile}
+          disabled={busy}
+          onDemo={onDemo}
+          stateOf={demoStateOf}
+        />
+      </div>
+
       {!ready ? (
         <div className="voice-empty">
           <p>
-            Separe as trilhas primeiro para isolar a voz principal. Depois volte aqui para trocar o
-            timbre.
+            Ouça os tipos de voz no exemplo acima. Para aplicar um deles na sua musica, separe as
+            trilhas primeiro: e preciso isolar a voz principal.
           </p>
           <button type="button" className="btn btn-secondary" onClick={onSeparate}>
             Separar trilhas agora
@@ -145,42 +172,31 @@ export function VoiceCard({
             </button>
           </div>
 
-          <div className="voice-grid">
-            <label className="field">
-              <span>Tipo de voz (por estilo)</span>
-              <select
-                value={profileId}
-                onChange={(event) => onProfile(event.target.value)}
-                disabled={busy}
-              >
-                {groups.map((group) => (
-                  <optgroup key={group.group} label={group.group}>
-                    {group.profiles.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </label>
-
-            <div className="voice-outlook">
-              <p className="voice-hint">{profile.hint}</p>
-              <p className="voice-shift">
-                Alvo: ~{Math.round(outlook.target)} Hz
-                {stats && stats.f0 > 0 && (
-                  <>
-                    {" · "}
-                    {outlook.semis >= 0 ? "+" : ""}
-                    {outlook.semis.toFixed(1)} semitons
-                  </>
-                )}
-                {" · "}
-                formantes {outlook.formantPercent >= 0 ? "+" : ""}
-                {outlook.formantPercent.toFixed(0)}%
-              </p>
-            </div>
+          <div className="voice-outlook">
+            <p className="voice-hint">{profile.hint}</p>
+            <p className="voice-shift">
+              Alvo: ~{Math.round(outlook.target)} Hz
+              {stats && stats.f0 > 0 && (
+                <>
+                  {" · "}
+                  {outlook.semis > 0 ? "+" : ""}
+                  {Math.round(outlook.semis)} st
+                  {keepKey
+                    ? outlook.semis === 0
+                      ? " (tom mantido)"
+                      : " (oitava — tom mantido)"
+                    : ""}
+                </>
+              )}
+              {" · "}
+              formantes {outlook.formantPercent >= 0 ? "+" : ""}
+              {outlook.formantPercent.toFixed(0)}%
+            </p>
+            <p className="voice-note">
+              O tom muda em semitons inteiros, entao a voz nunca fica desafinada com a musica. Com
+              "manter o tom" ligado, ela so sobe ou desce uma oitava: troca o registro sem sair da
+              tonalidade.
+            </p>
           </div>
 
           <div className="voice-sliders">
@@ -197,7 +213,9 @@ export function VoiceCard({
             </label>
 
             <label className="field">
-              <span>Tom (ajuste fino) · {semitoneLabel(semitones)}</span>
+              <span>
+                Tom (ajuste fino) · {keepKey ? "travado no tom" : semitoneLabel(semitones)}
+              </span>
               <input
                 type="range"
                 min={-12}
@@ -205,7 +223,7 @@ export function VoiceCard({
                 step={1}
                 value={semitones}
                 onChange={(event) => onSemitones(Number(event.target.value))}
-                disabled={busy}
+                disabled={busy || keepKey}
               />
             </label>
 
@@ -225,6 +243,16 @@ export function VoiceCard({
               />
             </label>
           </div>
+
+          <label className="field-toggle voice-key">
+            <input
+              type="checkbox"
+              checked={keepKey}
+              onChange={(event) => onKeepKey(event.target.checked)}
+              disabled={busy}
+            />
+            <span>Manter o tom da musica (voz so muda de oitava)</span>
+          </label>
 
           <div className="controls-row">
             <button
@@ -256,6 +284,7 @@ export function VoiceCard({
           </div>
 
           {error && <p className="voice-error">{error}</p>}
+          {demoError && <p className="voice-error">Previa da galeria: {demoError}</p>}
 
           {appliedLabel && !busy && (
             <p className="voice-done">
