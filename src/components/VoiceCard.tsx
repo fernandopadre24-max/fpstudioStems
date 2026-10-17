@@ -4,7 +4,7 @@ import type { VoiceDemoState } from "../hooks/useVoiceDemo";
 import { formatTime } from "../lib/audio";
 import type { VoiceStats } from "../lib/voice-core";
 import { describeVoiceStats, getVoiceProfile, resolveVoicePlan } from "../lib/voices";
-import { VOICE_SAMPLES } from "../lib/voiceSamples";
+import { VOICE_SAMPLE_CREDIT } from "../lib/voiceSamples";
 import { DownloadIcon, PauseIcon, PlayIcon } from "./Cards";
 import { VoiceGallery } from "./VoiceGallery";
 import { Waveform } from "./Waveform";
@@ -141,20 +141,18 @@ export function VoiceCard({
           stateOf={demoStateOf}
         />
         <p className="voice-credit">
-          Exemplos gravados por pessoas reais:{" "}
-          {VOICE_SAMPLES.map((sample, index) => (
-            <span key={sample.id}>
-              {index > 0 ? " · " : ""}
-              <a href={sample.credit.url} target="_blank" rel="noreferrer">
-                {sample.credit.title}
-              </a>{" "}
-              ({sample.credit.author},{" "}
-              <a href={sample.credit.licenseUrl} target="_blank" rel="noreferrer">
-                {sample.credit.license}
-              </a>
-              ; {sample.credit.changes})
-            </span>
-          ))}
+          Exemplos cantados por pessoas de verdade: cada figura adulta toca uma gravacao
+          diferente, sem nenhum processamento — o que se ouve e o timbre real da voz.{" "}
+          <a href={VOICE_SAMPLE_CREDIT.url} target="_blank" rel="noreferrer">
+            {VOICE_SAMPLE_CREDIT.title}
+          </a>{" "}
+          ({VOICE_SAMPLE_CREDIT.author};{" "}
+          <a href={VOICE_SAMPLE_CREDIT.licenseUrl} target="_blank" rel="noreferrer">
+            {VOICE_SAMPLE_CREDIT.license}
+          </a>
+          ; {VOICE_SAMPLE_CREDIT.changes}). As duas figuras infantis sao a excecao: nao ha
+          gravacao infantil no acervo livre, entao elas tocam a voz adulta mais leve um pouco
+          mais depressa.
         </p>
       </div>
 

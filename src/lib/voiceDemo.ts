@@ -1,14 +1,12 @@
 import { SAMPLE_RATE } from "./constants";
 
-// Acompanhamento do exemplo de timbre da galeria. A voz do exemplo vem de
-// gravacoes humanas reais (voiceSamples.ts); aqui fica so a base, sintetizada
-// na tonalidade da gravacao para nao brigar com ela.
+// Musica de fundo do exemplo de timbre da galeria. A voz do exemplo e uma
+// gravacao humana real (voiceSamples.ts), tocada sem processamento nenhum: o
+// que se ouve na galeria e o timbre de verdade daquela voz. Aqui fica so a
+// base, sintetizada na tonalidade da gravacao para nao brigar com ela.
 
 /** Duracao do trecho de exemplo, em segundos. */
 export const DEMO_SECONDS = 3.6;
-
-/** Tonica dos acordes abaixo (D3), antes de transpor para a gravacao. */
-const BASE_ROOT = 146.83;
 
 export interface DemoAudio {
   left: Float32Array;
@@ -18,16 +16,37 @@ export interface DemoAudio {
 interface DemoChord {
   at: number;
   dur: number;
-  hz: number[];
+  /** Semitons em relacao a tonica: [0, 4, 7] e a triade de I, e assim por diante. */
+  steps: number[];
 }
 
-// I - V - vi - IV em Re maior.
+// I - IV - vi - IV em cima da tonica. Nas quatro triades a tonica e nota do
+// acorde (fundamental, quinta, terceira e quinta), entao a nota sustentada da
+// gravacao encaixa em qualquer uma delas e a previa nunca soa desafinada — o
+// que aconteceria com V, que nao tem a tonica.
 const DEMO_CHORDS: DemoChord[] = [
-  { at: 0.0, dur: 0.95, hz: [146.83, 185.0, 220.0] },
-  { at: 0.9, dur: 0.95, hz: [110.0, 138.59, 164.81] },
-  { at: 1.8, dur: 0.95, hz: [123.47, 146.83, 185.0] },
-  { at: 2.7, dur: 0.9, hz: [98.0, 123.47, 146.83] },
+  { at: 0.0, dur: 0.95, steps: [0, 4, 7] },
+  { at: 0.9, dur: 0.95, steps: [5, 9, 12] },
+  { at: 1.8, dur: 0.95, steps: [9, 12, 16] },
+  { at: 2.7, dur: 0.9, steps: [5, 9, 12] },
 ];
+
+/** Faixa em que a base soa bem (grave o bastante para nao competir com a voz). */
+const BACKING_LOW = 98;
+const BACKING_HIGH = 196;
+
+/**
+ * Dobra a tonica em oitavas ate cair na faixa da base. Trocar de oitava nao
+ * muda a classe de altura, entao a harmonia com a voz continua identica — so
+ * evita uma base estridente quando a gravacao e de um soprano.
+ */
+export function foldToBackingRange(root: number): number {
+  if (!(root > 0)) return 146.83;
+  let value = root;
+  while (value < BACKING_LOW) value *= 2;
+  while (value > BACKING_HIGH) value /= 2;
+  return value;
+}
 
 /** Gerador simples e deterministico (o mesmo exemplo sempre soa igual). */
 function seededRandom(seed: number): () => number {
@@ -40,21 +59,21 @@ function seededRandom(seed: number): () => number {
 
 /**
  * Base instrumental do exemplo: pad leve + pulso, so para dar contexto musical.
- * `root` e a F0 da gravacao de voz, entao a progressao cai no mesmo tom dela e
- * a previa nunca soa desafinada.
+ * `root` e a F0 da gravacao de voz; a progressao e montada em cima dela, entao
+ * cai no mesmo tom da voz.
  */
-export function synthesizeDemoBacking(sampleRate = SAMPLE_RATE, root = BASE_ROOT): DemoAudio {
+export function synthesizeDemoBacking(sampleRate = SAMPLE_RATE, root = 146.83): DemoAudio {
   const total = Math.round(DEMO_SECONDS * sampleRate);
   const left = new Float32Array(total);
   const right = new Float32Array(total);
   const pans = [-0.45, 0, 0.45];
-  const ratio = root / BASE_ROOT;
+  const tonic = foldToBackingRange(root);
 
   DEMO_CHORDS.forEach((chord) => {
     const from = Math.round(chord.at * sampleRate);
     const length = Math.round(chord.dur * sampleRate);
-    chord.hz.forEach((base, voice) => {
-      const hz = base * ratio;
+    chord.steps.forEach((step, voice) => {
+      const hz = tonic * Math.pow(2, step / 12);
       const pan = pans[voice] ?? 0;
       const angle = ((pan + 1) / 2) * (Math.PI / 2);
       const gl = Math.cos(angle);
@@ -103,14 +122,17 @@ function softClip(values: Float32Array): void {
   }
 }
 
-/** Junta a voz transformada com a base: e o que toca na previa da galeria. */
+/**
+ * Junta a voz com a base. A voz chega normalizada (-17 dBFS), entao a base
+ * entra baixa de proposito: quem manda no exemplo e a voz.
+ */
 export function mixDemo(vocal: DemoAudio, backing: DemoAudio): DemoAudio {
   const total = Math.min(vocal.left.length, backing.left.length);
   const left = new Float32Array(total);
   const right = new Float32Array(total);
   for (let i = 0; i < total; i++) {
-    left[i] = vocal.left[i] + backing.left[i] * 0.55;
-    right[i] = vocal.right[i] + backing.right[i] * 0.55;
+    left[i] = vocal.left[i] + backing.left[i] * 0.45;
+    right[i] = vocal.right[i] + backing.right[i] * 0.45;
   }
   softClip(left);
   softClip(right);

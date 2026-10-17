@@ -178,17 +178,13 @@ export default function App() {
   } | null>(null);
   const [voicePreview, setVoicePreview] = useState<VoicePreview | null>(null);
   const activateVoiceDemo = useCallback(() => setActivePlayback("voiceDemo"), []);
-  // Previa de timbre da galeria: sintetiza o exemplo e transforma na hora, com
-  // os mesmos ajustes que serao aplicados na musica.
+  // Previa de timbre da galeria: toca a gravacao humana real daquele perfil,
+  // seca (sem morph), com a base sintetizada por baixo. O perfil selecionado
+  // fica pronto antes, para a previa comecar na hora.
   const voiceDemo = useVoiceDemo(
-    {
-      intensity: voiceIntensity,
-      semitones: voiceSemitones,
-      formant: voiceFormant,
-      keepKey: voiceKeepKey,
-    },
     activePlayback === "voiceDemo",
     activateVoiceDemo,
+    voiceProfileId,
   );
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
