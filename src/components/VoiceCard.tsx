@@ -4,6 +4,7 @@ import type { VoiceDemoState } from "../hooks/useVoiceDemo";
 import { formatTime } from "../lib/audio";
 import type { VoiceStats } from "../lib/voice-core";
 import { describeVoiceStats, getVoiceProfile, resolveVoicePlan } from "../lib/voices";
+import { VOICE_SAMPLES } from "../lib/voiceSamples";
 import { DownloadIcon, PauseIcon, PlayIcon } from "./Cards";
 import { VoiceGallery } from "./VoiceGallery";
 import { Waveform } from "./Waveform";
@@ -130,7 +131,7 @@ export function VoiceCard({
       <div className="voice-pick">
         <span className="voice-pick-label">
           Tipo de voz (por estilo) — passe o mouse e toque no play para ouvir o timbre num trecho de
-          exemplo
+          exemplo cantado por uma pessoa de verdade
         </span>
         <VoiceGallery
           profileId={profileId}
@@ -139,6 +140,22 @@ export function VoiceCard({
           onDemo={onDemo}
           stateOf={demoStateOf}
         />
+        <p className="voice-credit">
+          Exemplos gravados por pessoas reais:{" "}
+          {VOICE_SAMPLES.map((sample, index) => (
+            <span key={sample.id}>
+              {index > 0 ? " · " : ""}
+              <a href={sample.credit.url} target="_blank" rel="noreferrer">
+                {sample.credit.title}
+              </a>{" "}
+              ({sample.credit.author},{" "}
+              <a href={sample.credit.licenseUrl} target="_blank" rel="noreferrer">
+                {sample.credit.license}
+              </a>
+              ; {sample.credit.changes})
+            </span>
+          ))}
+        </p>
       </div>
 
       {!ready ? (
