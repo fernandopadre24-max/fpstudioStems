@@ -2064,6 +2064,149 @@ body {
   color: #b91c1c;
 }
 
+/* --- Troca de voz (morph de timbre) --- */
+
+.voice-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.voice-empty p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.voice-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.voice-source-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.voice-source strong {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.voice-source .btn {
+  margin-left: auto;
+}
+
+.voice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.voice-outlook {
+  flex: 1 1 260px;
+  min-width: 220px;
+}
+
+.voice-hint {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.voice-shift {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.voice-sliders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 22px;
+  margin-top: 16px;
+}
+
+.voice-sliders .field {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.voice-sliders input[type="range"] {
+  width: 100%;
+  accent-color: #ff9ecd;
+}
+
+.voice-panel .controls-row {
+  margin-top: 16px;
+}
+
+.voice-error {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 92, 114, 0.4);
+  background: rgba(255, 92, 114, 0.1);
+  color: #ffd0d7;
+  font-size: 14px;
+}
+
+.voice-done {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.voice-done strong {
+  color: #ff9ecd;
+}
+
+.voice-preview {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.voice-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.voice-preview .card-controls {
+  margin-top: 10px;
+}
+
+[data-theme="light"] .voice-error {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.07);
+  color: #b91c1c;
+}
+
+
 
 
 

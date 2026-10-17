@@ -29,6 +29,7 @@ import {
   getModel,
   getPreset,
   SAMPLE_RATE,
+  STEM_BY_ID,
   STEM_PRESETS,
   STEMS,
   WHISPER_MODELS,
@@ -64,6 +65,10 @@ import type { WorkerResponse } from "./lib/protocol";
 import { buildAbc, buildScore, type Score } from "./lib/score";
 import { SeparationEngine } from "./lib/separationClient";
 import { ScoreView } from "./components/ScoreView";
+import { VoiceCard, type VoicePreview } from "./components/VoiceCard";
+import { applyVoice, measureVoice, type VoiceJob } from "./lib/voiceClient";
+import { findVoiceWindow, type VoiceStats } from "./lib/voice-core";
+import { DEFAULT_VOICE_ID, getVoiceProfile, resolveVoicePlan } from "./lib/voices";
 
 type Phase = "idle" | "decoding" | "ready" | "separating" | "done";
 type ModelStatus = "unknown" | "missing" | "downloading" | "ready";
@@ -123,9 +128,9 @@ export default function App() {
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
   const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
   const [separationNote, setSeparationNote] = useState<string | null>(null);
-  const [activePlayback, setActivePlayback] = useState<"mixer" | "original" | "instrumental" | null>(
-    null,
-  );
+  const [activePlayback, setActivePlayback] = useState<
+    "mixer" | "original" | "instrumental" | "voicePreview" | null
+  >(null);
   const [zipState, setZipState] = useState<"idle" | "working">("idle");
   const [gpuBlocked, setGpuBlocked] = useState<boolean>(readGpuBlocked);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -153,6 +158,23 @@ export default function App() {
   const [scoreError, setScoreError] = useState<string | null>(null);
   const [score, setScore] = useState<Score | null>(null);
   const [scoreStep, setScoreStep] = useState("");
+  const [voiceProfileId, setVoiceProfileId] = useState(DEFAULT_VOICE_ID);
+  const [voiceIntensity, setVoiceIntensity] = useState(1);
+  const [voiceSemitones, setVoiceSemitones] = useState(0);
+  const [voiceFormant, setVoiceFormant] = useState(0);
+  const [voiceStats, setVoiceStats] = useState<VoiceStats | null>(null);
+  const [voiceMeasuring, setVoiceMeasuring] = useState(false);
+  const [voiceMeasureKey, setVoiceMeasureKey] = useState(0);
+  const [voiceStatus, setVoiceStatus] = useState<"idle" | "working">("idle");
+  const [voiceProgress, setVoiceProgress] = useState<number | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voiceResult, setVoiceResult] = useState<{
+    left: Float32Array;
+    right: Float32Array;
+    peaks: Float32Array;
+    label: string;
+  } | null>(null);
+  const [voicePreview, setVoicePreview] = useState<VoicePreview | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const saved = localStorage.getItem("stemroller.theme");
@@ -166,6 +188,8 @@ export default function App() {
   // Trilha escolhida para a partitura que ainda precisa ser separada; quando a
   // separacao termina, a partitura e gerada automaticamente.
   const pendingScoreRef = useRef<string | null>(null);
+  // Transformacao de voz em andamento (para poder cancelar).
+  const voiceJobRef = useRef<VoiceJob | null>(null);
 
   const decodedRef = useRef<DecodedAudio | null>(null);
   decodedRef.current = decoded;
@@ -203,6 +227,10 @@ export default function App() {
 
   const applyResults = useCallback((stems: ResultStem[]) => {
     setResults(stems);
+    setVoiceResult(null);
+    setVoicePreview(null);
+    setVoiceStats(null);
+    setVoiceError(null);
     const length = stems[0]?.left.length ?? 0;
     if (length > 0) {
       const buffer = new AudioBuffer({ length, numberOfChannels: 2, sampleRate: SAMPLE_RATE });
@@ -225,8 +253,12 @@ export default function App() {
 
   const mixerTracks = useMemo<MixerTrack[] | null>(() => {
     if (!results) return null;
-    return results.map((stem) => ({ id: stem.id, left: stem.left, right: stem.right }));
-  }, [results]);
+    const tracks = results.map((stem) => ({ id: stem.id, left: stem.left, right: stem.right }));
+    if (voiceResult) {
+      tracks.push({ id: "clonedVocal", left: voiceResult.left, right: voiceResult.right });
+    }
+    return tracks;
+  }, [results, voiceResult]);
 
   const mixer = useMixer(mixerTracks);
 
@@ -464,6 +496,112 @@ export default function App() {
     const blob = encodeAudio(decoded.left, decoded.right, exportFormat);
     downloadBlob(blob, `${baseName}.${ext}`);
   }, [baseName, decoded, exportFormat, ext]);
+
+  // --- Troca de voz (morph de timbre) ---
+
+  // Trilha de origem: a voz principal isolada (presets 8/10/12) ou, na falta
+  // dela, os vocais.
+  const voiceSource = useMemo(() => {
+    if (!results) return null;
+    return (
+      results.find((stem) => stem.id === "leadVocal") ??
+      results.find((stem) => stem.id === "vocals") ??
+      null
+    );
+  }, [results]);
+
+  // Mede a voz de origem automaticamente quando uma nova separacao chega (e de
+  // novo quando o usuario pede).
+  useEffect(() => {
+    if (!voiceSource) {
+      setVoiceStats(null);
+      return;
+    }
+    let active = true;
+    setVoiceMeasuring(true);
+    setVoiceError(null);
+    measureVoice(voiceSource.left, voiceSource.right, SAMPLE_RATE)
+      .then((stats) => {
+        if (active) setVoiceStats(stats);
+      })
+      .catch((cause) => {
+        if (active) setVoiceError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (active) setVoiceMeasuring(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [voiceSource, voiceMeasureKey]);
+
+  const runVoice = useCallback(
+    async (target: "preview" | "full") => {
+      if (!voiceSource) return;
+      const profile = getVoiceProfile(voiceProfileId);
+      setVoiceError(null);
+      setVoiceStatus("working");
+      setVoiceProgress(0);
+      try {
+        const stats =
+          voiceStats ?? (await measureVoice(voiceSource.left, voiceSource.right, SAMPLE_RATE));
+        if (!voiceStats) setVoiceStats(stats);
+        const plan = resolveVoicePlan(profile, stats, {
+          intensity: voiceIntensity,
+          semitones: voiceSemitones,
+          formant: voiceFormant,
+        });
+        const window =
+          target === "preview"
+            ? findVoiceWindow(voiceSource.left, voiceSource.right, SAMPLE_RATE, 15)
+            : { start: 0, end: Math.min(voiceSource.left.length, voiceSource.right.length) };
+        const job = applyVoice(
+          voiceSource.left.subarray(window.start, window.end),
+          voiceSource.right.subarray(window.start, window.end),
+          stats,
+          plan,
+          SAMPLE_RATE,
+          setVoiceProgress,
+        );
+        voiceJobRef.current = job;
+        const output = await job.promise;
+        if (!output) return;
+        const peaks = computePeaks(output.left, output.right);
+        if (target === "preview") {
+          const buffer = new AudioBuffer({
+            length: output.left.length,
+            numberOfChannels: 2,
+            sampleRate: SAMPLE_RATE,
+          });
+          buffer.getChannelData(0).set(output.left);
+          buffer.getChannelData(1).set(output.right);
+          setVoicePreview({ buffer, peaks });
+          setActivePlayback("voicePreview");
+        } else {
+          setVoiceResult({ left: output.left, right: output.right, peaks, label: profile.label });
+        }
+      } catch (cause) {
+        setVoiceError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        voiceJobRef.current = null;
+        setVoiceStatus("idle");
+        setVoiceProgress(null);
+      }
+    },
+    [voiceFormant, voiceIntensity, voiceProfileId, voiceSemitones, voiceSource, voiceStats],
+  );
+
+  const cancelVoice = useCallback(() => {
+    voiceJobRef.current?.cancel();
+  }, []);
+
+  const downloadVoice = useCallback(() => {
+    if (!voiceResult) return;
+    const blob = encodeAudio(voiceResult.left, voiceResult.right, exportFormat, {
+      range: rangeSamples,
+    });
+    downloadBlob(blob, `${baseName} - Voz transformada${corte}.${ext}`);
+  }, [baseName, corte, exportFormat, ext, rangeSamples, voiceResult]);
 
   const searchOnlineLyrics = useCallback(async () => {
     if (!decoded) return;
@@ -849,6 +987,14 @@ export default function App() {
         blob: encodeAudio(stem.left, stem.right, exportFormat, { range: rangeSamples }),
       });
     }
+    if (voiceResult) {
+      entries.push({
+        name: `${baseName} - Voz transformada${corte}.${ext}`,
+        blob: encodeAudio(voiceResult.left, voiceResult.right, exportFormat, {
+          range: rangeSamples,
+        }),
+      });
+    }
     if (instrumental) {
       entries.push({
         name: `${baseName} - Instrumental${corte}.${ext}`,
@@ -892,7 +1038,7 @@ export default function App() {
     } finally {
       setZipState("idle");
     }
-  }, [baseName, chordSheet, cifraText, corte, exportFormat, ext, instrumental, lyricsLrc, lyricsText, rangeSamples, results]);
+  }, [baseName, chordSheet, cifraText, corte, exportFormat, ext, instrumental, lyricsLrc, lyricsText, rangeSamples, results, voiceResult]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1474,10 +1620,15 @@ export default function App() {
             )}
 
             <Editor
-              tracks={results.map((stem) => ({
-                meta: STEMS.find((item) => item.id === stem.id)!,
-                peaks: stem.peaks,
-              }))}
+              tracks={[
+                ...results.map((stem) => ({
+                  meta: STEMS.find((item) => item.id === stem.id)!,
+                  peaks: stem.peaks,
+                })),
+                ...(voiceResult
+                  ? [{ meta: STEM_BY_ID.get("clonedVocal")!, peaks: voiceResult.peaks }]
+                  : []),
+              ]}
               states={mixer.states}
               position={mixer.position}
               duration={mixer.duration}
@@ -1494,6 +1645,35 @@ export default function App() {
               downloadLabel={ext.toUpperCase()}
             />
           </section>
+        )}
+
+        {decoded && (
+          <VoiceCard
+            ready={Boolean(voiceSource)}
+            measuring={voiceMeasuring}
+            stats={voiceStats}
+            status={voiceStatus}
+            progress={voiceProgress}
+            error={voiceError}
+            profileId={voiceProfileId}
+            onProfile={setVoiceProfileId}
+            intensity={voiceIntensity}
+            onIntensity={setVoiceIntensity}
+            semitones={voiceSemitones}
+            onSemitones={setVoiceSemitones}
+            formant={voiceFormant}
+            onFormant={setVoiceFormant}
+            preview={voicePreview}
+            active={activePlayback === "voicePreview"}
+            onActivate={() => setActivePlayback("voicePreview")}
+            onPreview={() => void runVoice("preview")}
+            appliedLabel={voiceResult?.label ?? null}
+            onApply={() => void runVoice("full")}
+            onCancel={cancelVoice}
+            onDownload={downloadVoice}
+            onMeasure={() => setVoiceMeasureKey((key) => key + 1)}
+            onSeparate={startSeparation}
+          />
         )}
 
         {decoded && (

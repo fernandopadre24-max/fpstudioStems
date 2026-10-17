@@ -14,6 +14,7 @@ export type StemId =
   | "vocals"
   | "leadVocal"
   | "backingVocal"
+  | "clonedVocal"
   | "guitar"
   | "piano";
 
@@ -102,6 +103,12 @@ export const STEMS: StemMeta[] = [
     label: "Backing vocal",
     description: "Backing vocals e harmonias",
     color: "#f4a261",
+  },
+  {
+    id: "clonedVocal",
+    label: "Voz transformada",
+    description: "Voz principal com o timbre trocado",
+    color: "#ff9ecd",
   },
   {
     id: "guitar",
