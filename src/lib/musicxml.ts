@@ -153,6 +153,20 @@ export function buildMusicXml(score: Score): string {
       );
       parts.push(clef);
       parts.push("      </attributes>");
+      // Tempo: o ABC e o MIDI ja levam o andamento, mas o MusicXML precisa
+      // declarar — sem isso o MuseScore/Finale abrem a partitura a 120 BPM e ela
+      // toca em outra velocidade que o audio. O <sound tempo> do MusicXML e
+      // sempre em seminimas por minuto, entao a conta sai do pulso lido (que em
+      // compasso composto e pontuado).
+      const quarterPerMinute = Math.max(1, Math.round(score.bpm * (score.unitsPerBeat / 4)));
+      parts.push('      <direction placement="above">');
+      parts.push("        <direction-type>");
+      parts.push(
+        `          <metronome><beat-unit>quarter</beat-unit><per-minute>${quarterPerMinute}</per-minute></metronome>`,
+      );
+      parts.push("        </direction-type>");
+      parts.push(`        <sound tempo="${quarterPerMinute}"/>`);
+      parts.push("      </direction>");
     }
     for (const event of measure.events) {
       if (event.kind === "note" && event.chord) {
