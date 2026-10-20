@@ -381,18 +381,22 @@ export interface ReadingAssessment {
 }
 
 export function assessReading(notes: MelodyNote[]): ReadingAssessment {
-  if (notes.length < 2) return { suspicious: false, span: 0, leapRatio: 0, reasons: [] };
-  let low = notes[0].midi;
-  let high = notes[0].midi;
+  // Faisca de 0,1 s nao condena a leitura: o aviso olha so as notas que ficam na
+  // pauta. Uma nota curta isolada dois tons abaixo ja e removida na limpeza e
+  // nao deve fazer o app dizer que a trilha veio misturada.
+  const solid = notes.filter((note) => note.end - note.start >= 0.15);
+  if (solid.length < 2) return { suspicious: false, span: 0, leapRatio: 0, reasons: [] };
+  let low = solid[0].midi;
+  let high = solid[0].midi;
   let leaps = 0;
-  for (let i = 0; i < notes.length; i++) {
-    const midi = notes[i].midi;
+  for (let i = 0; i < solid.length; i++) {
+    const midi = solid[i].midi;
     if (midi < low) low = midi;
     if (midi > high) high = midi;
-    if (i > 0 && Math.abs(midi - notes[i - 1].midi) >= 12) leaps++;
+    if (i > 0 && Math.abs(midi - solid[i - 1].midi) >= 12) leaps++;
   }
   const span = high - low;
-  const leapRatio = leaps / (notes.length - 1);
+  const leapRatio = leaps / (solid.length - 1);
   const reasons: string[] = [];
   if (span >= READING_SPAN_LIMIT) {
     reasons.push(`a melodia lida cobre ${(span / 12).toFixed(1).replace(".", ",")} oitavas`);

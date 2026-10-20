@@ -64,6 +64,8 @@ const OCTAVE_CONFLICT_WEIGHT = 1.2;
  * candidatos explicam a mesma serie e a escolha viraria moeda ao ar.
  */
 const DETUNE_PENALTY = 0.2;
+/** Quanto pesa um candidato cuja fundamental esta vazia (sub-harmonico). */
+const DEAD_FUNDAMENTAL_WEIGHT = 0.45;
 const MIN_NOTE_SECONDS = 0.08;
 const GAP_TOLERANCE_FRAMES = 3;
 /** Restos separados por menos que isso sao a mesma nota. */
@@ -334,13 +336,24 @@ export function extractMelody(
       }
       // Conflito de oitava: os multiplos impares de metade da frequencia
       // (f0/2, 1,5f0, 2,5f0) nao sao harmonicos de f0. Se houver energia ali,
-      // a nota verdadeira e uma oitava abaixo — tipico de voz cuja fundamental
-      // e fraca e cujo terceiro/quinto harmonico e forte.
-      const conflict =
-        (sampleAt(candidateF0 / 2) + sampleAt(candidateF0 * 1.5) + sampleAt(candidateF0 * 2.5)) / 3;
+      // a nota verdadeira pode ser uma oitava abaixo. A fundamental de f0/2
+      // precisa existir: sem ela os outros dois pontos podem estar pegando
+      // notas alheias (backing vocal, instrumento vazando) e o leitor descia
+      // uma oitava sem motivo.
+      const halfBelow = sampleAt(candidateF0 / 2);
+      const oddAbove = (sampleAt(candidateF0 * 1.5) + sampleAt(candidateF0 * 2.5)) / 2;
+      const conflict = Math.min(halfBelow, oddAbove);
+      // Fundamental morta: quando o 1o harmonico esta no chao e o 2o/3o/4o sao
+      // fortes, o candidato e o sub-harmonico da nota real (uma oitava abaixo).
+      // Sem esta conta ele vencia so por "explicar" a serie da nota verdadeira
+      // com os proprios harmonicos pares — a causa das notas graves inventadas.
+      const strong =
+        (sampleAt(candidateF0 * 2) + sampleAt(candidateF0 * 3) + sampleAt(candidateF0 * 4)) / 3;
+      const deadFundamental = Math.max(0, Math.min(strong, 4) - 2 * sampleAt(candidateF0));
       const score =
         candidateBest -
         OCTAVE_CONFLICT_WEIGHT * Math.min(conflict, 6) -
+        DEAD_FUNDAMENTAL_WEIGHT * deadFundamental -
         DETUNE_PENALTY * (Math.abs(candidateCents) / DETUNE_CENTS);
       salience[row + (m - MIN_MIDI)] = score;
       if (score > best) {
@@ -466,16 +479,25 @@ export function extractMelody(
   const timeAt = (frame: number) => (frame * HOP) / rate + latency;
 
   /**
-   * Altura da nota: mediana do pico fino ao longo do proprio trecho. O estado
-   * inteiro do Viterbi diz onde a nota esta, mas nao a altura exata — quem diz e
-   * a desafinacao medida quadro a quadro.
+   * Altura da nota: media aparada do pico fino ao longo do proprio trecho. O
+   * estado inteiro do Viterbi diz onde a nota esta, mas nao a altura exata —
+   * quem diz e a desafinacao medida quadro a quadro. Numa nota estavel a media
+   * aparada da a propria nota; num vibrato largo, em que a voz *passa mais
+   * tempo nas bordas* que no centro, da o centro da oscilacao, que e a nota
+   * cantada (a mediana simples ficava presa numa das bordas, um semitom fora).
    */
   const pitchOf = (segment: Segment): number => {
     const from = Math.max(0, segment.startFrame);
     const to = Math.min(frames - 1, segment.endFrame);
     const values: number[] = [];
     for (let f = from; f <= to; f++) values.push(fineMidi[f]);
-    return Math.round(median(values));
+    if (values.length === 0) return segment.midi;
+    values.sort((a, b) => a - b);
+    const cut = Math.floor(values.length * 0.15);
+    const middle = cut > 0 ? values.slice(cut, values.length - cut) : values;
+    let sum = 0;
+    for (const value of middle) sum += value;
+    return Math.round(sum / middle.length);
   };
 
   const segments: Segment[] = [];
@@ -591,7 +613,19 @@ export function extractMelody(
       collapsed.push(segment);
       continue;
     }
-    if (run.length > 0 && Math.abs(segment.midi - run[0].midi) > 2) flushRun();
+    // Fecha a corrida quando o INTERVALO do conjunto (nao so a distancia ate o
+    // primeiro) passa de 2 semitons: sem isso, a nota seguinte entrava na
+    // corrida, estourava o intervalo e o colapso nao acontecia — e o vibrato
+    // saia na pauta como uma escada de quatro notas.
+    if (run.length > 0) {
+      let low = segment.midi;
+      let high = segment.midi;
+      for (const other of run) {
+        if (other.midi < low) low = other.midi;
+        if (other.midi > high) high = other.midi;
+      }
+      if (high - low > 2) flushRun();
+    }
     run.push(segment);
   }
   flushRun();
