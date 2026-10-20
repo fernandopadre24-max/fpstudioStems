@@ -2064,6 +2064,31 @@ body {
   color: #b91c1c;
 }
 
+.score-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
+  color: #ffe3b0;
+  font-size: 14px;
+}
+
+.score-warning p {
+  flex: 1 1 320px;
+  margin: 0;
+}
+
+[data-theme="light"] .score-warning {
+  border-color: rgba(217, 119, 6, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+}
+
 /* --- Troca de voz (morph de timbre) --- */
 
 .voice-empty {

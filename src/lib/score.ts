@@ -359,6 +359,88 @@ function chordAt(chords: ChordSegment[], time: number): string {
   return chords[chords.length - 1].chord;
 }
 
+/**
+ * Uma melodia de verdade nao cobre 3,3 oitavas (40 semitons) nem troca de nota
+ * saltando uma oitava ou mais em metade das vezes. Quando o leitor recebe uma
+ * trilha que ainda mistura instrumentos, ele fica trocando de fonte e cai num
+ * desses dois casos. Calibrado medindo 20 vozes humanas reais (nenhuma dispara)
+ * contra trilhas misturadas (todas disparam).
+ */
+const READING_SPAN_LIMIT = 40;
+const READING_LEAP_LIMIT = 0.5;
+
+export interface ReadingAssessment {
+  /** true = a leitura provavelmente nao e uma melodia unica. */
+  suspicious: boolean;
+  /** Extensao em semitons entre a nota mais grave e a mais aguda. */
+  span: number;
+  /** Fracao das trocas de nota que saltam uma oitava ou mais (0..1). */
+  leapRatio: number;
+  /** Motivos do alerta, ja em texto, para a interface. */
+  reasons: string[];
+}
+
+export function assessReading(notes: MelodyNote[]): ReadingAssessment {
+  if (notes.length < 2) return { suspicious: false, span: 0, leapRatio: 0, reasons: [] };
+  let low = notes[0].midi;
+  let high = notes[0].midi;
+  let leaps = 0;
+  for (let i = 0; i < notes.length; i++) {
+    const midi = notes[i].midi;
+    if (midi < low) low = midi;
+    if (midi > high) high = midi;
+    if (i > 0 && Math.abs(midi - notes[i - 1].midi) >= 12) leaps++;
+  }
+  const span = high - low;
+  const leapRatio = leaps / (notes.length - 1);
+  const reasons: string[] = [];
+  if (span >= READING_SPAN_LIMIT) {
+    reasons.push(`a melodia lida cobre ${(span / 12).toFixed(1).replace(".", ",")} oitavas`);
+  }
+  if (leapRatio >= READING_LEAP_LIMIT) {
+    reasons.push(`${Math.round(leapRatio * 100)}% das trocas de nota saltam uma oitava ou mais`);
+  }
+  return { suspicious: reasons.length > 0, span, leapRatio, reasons };
+}
+
+/** Abaixo disso (uma semicolcheia e pouco, no minimo 100 ms) a nota e candidata a faisca. */
+const GLITCH_MIN_SECONDS = 0.1;
+const GLITCH_GRID_FACTOR = 1.2;
+/** Distancia (em semitons) a partir da qual o vizinho ja e "outra nota". */
+const GLITCH_ISLAND_SEMITONES = 5;
+/** Trechos separados por menos que isso sao o mesmo som continuando. */
+const GLITCH_GAP_SECONDS = 0.06;
+
+/**
+ * Remove as "faiscas": notas curtissimas isoladas em altura entre trechos
+ * longos. Sao quase sempre o leitor perdendo a voz por um instante (vibrato
+ * largo, sub-harmonico, respiracao) e na pauta viram um borrao de notas curtas.
+ * O tempo delas fica com a nota anterior, que e quem estava mesmo soando.
+ */
+export function cleanMelody(notes: MelodyNote[], gridSeconds: number): MelodyNote[] {
+  const limit = Math.max(GLITCH_MIN_SECONDS, gridSeconds * GLITCH_GRID_FACTOR);
+  const out: MelodyNote[] = [];
+  for (let i = 0; i < notes.length; i++) {
+    const note = notes[i];
+    if (note.end - note.start < limit) {
+      const previous = i > 0 ? notes[i - 1] : null;
+      const next = i + 1 < notes.length ? notes[i + 1] : null;
+      const far = (other: MelodyNote | null) =>
+        !other || Math.abs(other.midi - note.midi) >= GLITCH_ISLAND_SEMITONES;
+      // Nota curta encostada num vizinho de altura parecida e passagem de
+      // verdade (semicolcheia, ornamento), entao fica.
+      if (far(previous) && far(next)) continue;
+    }
+    out.push({ ...note });
+  }
+
+  for (let i = 0; i < out.length - 1; i++) {
+    const gap = out[i + 1].start - out[i].end;
+    if (gap > 0 && gap < GLITCH_GAP_SECONDS) out[i].end = out[i + 1].start;
+  }
+  return out;
+}
+
 export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Score {
   const baseBpm = options.bpm && options.bpm > 20 ? options.bpm : DEFAULT_BPM;
   const beatsPerBar = options.beatsPerBar ?? 4;
@@ -366,8 +448,12 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
   const unitsPerMeasure = Math.round((beatsPerBar * 16) / beatType);
   // Tempo e alinhamento do compasso tirados da propria melodia (a analise do
   // mix pode errar o BPM, e isso desalinha toda a pauta).
-  const bpm = estimateMelodyTempo(notes, baseBpm);
-  const fit = fitPhase(notes, bpm, beatsPerBar);
+  // As faiscas inflam a contagem de ataques, entao o tempo e estimado uma vez
+  // nos dados crus (so para achar a grade) e de novo na lista ja limpa.
+  const guessBpm = estimateMelodyTempo(notes, baseBpm);
+  const cleaned = cleanMelody(notes, 60 / guessBpm / 4);
+  const bpm = estimateMelodyTempo(cleaned, baseBpm);
+  const fit = fitPhase(cleaned, bpm, beatsPerBar);
   const offset = fit.offset;
   const gridSeconds = 60 / bpm / 4; // semicolcheia
   const unitsPerBeat =
@@ -402,8 +488,8 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
 
   const shifted =
     offset === 0
-      ? notes
-      : notes.map((note) => ({ ...note, start: note.start - offset, end: note.end - offset }));
+      ? cleaned
+      : cleaned.map((note) => ({ ...note, start: note.start - offset, end: note.end - offset }));
   const rawEvents = quantizeNotes(shifted, gridSeconds, unitsPerBeat);
   const chords = options.chords ?? [];
   const measures: ScoreMeasure[] = [];
@@ -515,7 +601,7 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
 
   return {
     measures,
-    notes: notes.map((note) => ({ start: note.start, end: note.end, midi: note.midi })),
+    notes: cleaned.map((note) => ({ start: note.start, end: note.end, midi: note.midi })),
     bpm,
     beatsPerBar,
     beatType,

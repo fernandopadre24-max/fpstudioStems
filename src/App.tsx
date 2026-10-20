@@ -63,7 +63,7 @@ import { LyricsEngine, toWhisperAudio, whisperToLrc, type TranscribeProgress } f
 import { buildMidi } from "./lib/midi";
 import { buildMusicXml } from "./lib/musicxml";
 import type { WorkerResponse } from "./lib/protocol";
-import { buildAbc, buildScore, type Score } from "./lib/score";
+import { assessReading, buildAbc, buildScore, type Score } from "./lib/score";
 import { SeparationEngine } from "./lib/separationClient";
 import { ScoreView } from "./components/ScoreView";
 import { VoiceCard, type VoicePreview } from "./components/VoiceCard";
@@ -157,6 +157,7 @@ export default function App() {
   const [scoreSource, setScoreSource] = useState("");
   const [scoreStatus, setScoreStatus] = useState<"idle" | "working">("idle");
   const [scoreError, setScoreError] = useState<string | null>(null);
+  const [scoreWarning, setScoreWarning] = useState<string | null>(null);
   const [score, setScore] = useState<Score | null>(null);
   const [scoreStep, setScoreStep] = useState("");
   const [voiceProfileId, setVoiceProfileId] = useState(DEFAULT_VOICE_ID);
@@ -792,75 +793,92 @@ export default function App() {
     [results, scoreSource],
   );
 
-  const generateScore = useCallback(async () => {
-    if (!decoded) return;
-    setScoreError(null);
+  const generateScore = useCallback(
+    async (sourceOverride?: string) => {
+      if (!decoded) return;
+      const source = sourceOverride ?? scoreSource;
+      setScoreError(null);
+      setScoreWarning(null);
 
-    // Trilha escolhida (voz principal ou instrumento) que ainda nao foi
-    // separada: dispara a separacao e retoma sozinho quando ela terminar.
-    const stem =
-      scoreSource === "original" ? null : results?.find((item) => item.id === scoreSource) ?? null;
-    if (scoreSource !== "original" && !stem) {
-      pendingScoreRef.current = scoreSource;
+      // Trilha escolhida (voz principal ou instrumento) que ainda nao foi
+      // separada: dispara a separacao e retoma sozinho quando ela terminar.
+      const stem =
+        source === "original" ? null : results?.find((item) => item.id === source) ?? null;
+      if (source !== "original" && !stem) {
+        pendingScoreRef.current = source;
+        setScore(null);
+        setScoreStatus("working");
+        setScoreStep("Separando as trilhas...");
+        startSeparation();
+        return;
+      }
+
       setScore(null);
       setScoreStatus("working");
-      setScoreStep("Separando as trilhas...");
-      startSeparation();
-      return;
-    }
-
-    setScore(null);
-    setScoreStatus("working");
-    setScoreStep("Extraindo a melodia...");
-    try {
-      let left: Float32Array;
-      let right: Float32Array;
-      let instrumentLabel: string;
-      if (!stem) {
-        left = decoded.left;
-        right = decoded.right;
-        instrumentLabel = "Música original";
-      } else {
-        left = stem.left;
-        right = stem.right;
-        instrumentLabel = STEMS.find((item) => item.id === stem.id)?.label ?? String(stem.id);
-      }
-
-      const melody = await analyzeMelody(left, right, SAMPLE_RATE);
-      if (melody.notes.length === 0) {
-        throw new Error(
-          "Não encontrei uma melodia nessa trilha. Tente a voz principal ou outro instrumento de solo.",
-        );
-      }
-
-      setScoreStep("Alinhando com a harmonia...");
-      let chordSegments = chords;
-      if (!chordSegments) {
-        try {
-          chordSegments = await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key);
-          setChords(chordSegments);
-        } catch {
-          chordSegments = null;
+      setScoreStep("Extraindo a melodia...");
+      try {
+        let left: Float32Array;
+        let right: Float32Array;
+        let instrumentLabel: string;
+        if (!stem) {
+          left = decoded.left;
+          right = decoded.right;
+          instrumentLabel = "Música original";
+        } else {
+          left = stem.left;
+          right = stem.right;
+          instrumentLabel = STEMS.find((item) => item.id === stem.id)?.label ?? String(stem.id);
         }
-      }
 
-      const built = buildScore(melody.notes, {
-        bpm: analysis?.bpm,
-        key: analysis?.key ?? null,
-        chords: chordSegments ?? [],
-        instrumentLabel,
-        title: identity.title || baseName,
-        artist: identity.artist,
-        medianMidi: melody.medianMidi,
-      });
-      setScore(built);
-    } catch (cause) {
-      setScoreError(cause instanceof Error ? cause.message : "Falha ao gerar a partitura.");
-    } finally {
-      setScoreStatus("idle");
-      setScoreStep("");
-    }
-  }, [analysis, baseName, chords, decoded, identity, results, scoreSource, startSeparation]);
+        const melody = await analyzeMelody(left, right, SAMPLE_RATE);
+        if (melody.notes.length === 0) {
+          throw new Error(
+            "Não encontrei uma melodia nessa trilha. Tente a voz principal ou outro instrumento de solo.",
+          );
+        }
+
+        setScoreStep("Alinhando com a harmonia...");
+        let chordSegments = chords;
+        if (!chordSegments) {
+          try {
+            chordSegments = await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key);
+            setChords(chordSegments);
+          } catch {
+            chordSegments = null;
+          }
+        }
+
+        const built = buildScore(melody.notes, {
+          bpm: analysis?.bpm,
+          key: analysis?.key ?? null,
+          chords: chordSegments ?? [],
+          instrumentLabel,
+          title: identity.title || baseName,
+          artist: identity.artist,
+          medianMidi: melody.medianMidi,
+        });
+        setScore(built);
+
+        // A partitura so vale se a leitura for de UMA melodia. Quando o leitor
+        // recebe uma trilha que ainda mistura instrumentos, ele troca de fonte
+        // o tempo todo e a pauta vira borrao — melhor avisar que entregar.
+        const reading = assessReading(melody.notes);
+        if (reading.suspicious) {
+          setScoreWarning(
+            `A leitura de «${instrumentLabel}» saiu misturada: ${reading.reasons.join(" e ")}. ` +
+              "Isso costuma acontecer quando a trilha ainda traz restos de outros instrumentos. " +
+              "Ouça a trilha e, se ela estiver suja, leia de outra trilha ou da música original.",
+          );
+        }
+      } catch (cause) {
+        setScoreError(cause instanceof Error ? cause.message : "Falha ao gerar a partitura.");
+      } finally {
+        setScoreStatus("idle");
+        setScoreStep("");
+      }
+    },
+    [analysis, baseName, chords, decoded, identity, results, scoreSource, startSeparation],
+  );
 
   // Retoma a partitura pedida antes da separacao terminar.
   useEffect(() => {
@@ -868,7 +886,7 @@ export default function App() {
     if (!pending) return;
     if (results?.some((item) => item.id === pending)) {
       pendingScoreRef.current = null;
-      void generateScore();
+      void generateScore(pending);
       return;
     }
     // Separacao encerrou sem produzir a trilha (falhou ou foi cancelada).
@@ -1756,6 +1774,24 @@ export default function App() {
             {scoreError && (
               <div className="score-error" role="alert">
                 {scoreError}
+              </div>
+            )}
+
+            {scoreWarning && (
+              <div className="score-warning" role="status">
+                <p>{scoreWarning}</p>
+                {scoreSource !== "original" && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      setScoreSource("original");
+                      void generateScore("original");
+                    }}
+                  >
+                    Ler da música original
+                  </button>
+                )}
               </div>
             )}
 
