@@ -119,11 +119,17 @@ export function SupportCard({ onClose }: SupportCardProps) {
 
             <div className="support-pix-data">
               <span className="support-label">Chave PIX (CPF)</span>
-              <code>{PIX_KEY_LABEL}</code>
+              <code title="A chave completa é copiada ao usar os botões abaixo">
+                {maskedKey}
+              </code>
               <span className="support-label">Recebedor</span>
               <code>{PIX_RECEIVER}</code>
               <span className="support-label">Banco</span>
               <code>{PIX_BANK}</code>
+              <span className="support-label">Agência</span>
+              <code>0001</code>
+              <span className="support-label">Conta</span>
+              <code>4685093-0</code>
               <span className="support-label">Cidade</span>
               <code>{PIX_CITY}</code>
 
