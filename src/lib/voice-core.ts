@@ -1,11 +1,20 @@
 import { fft } from "./analysis-core";
 import { extractMelody } from "./melody-core";
 
-// Morph de voz por DSP: reamostra o espectro (muda o pitch), corrige o envelope
-// do trato vocal (muda os formantes, independente do pitch), ajusta brilho,
-// nasalidade e anel, e acrescenta vibrato, raspagem e ar. Nao e clonagem
-// neural: e uma troca de timbre, no espirito do resto do app (HPSS, cortes de
-// banda, KARA 2).
+// Morph de voz por DSP: estica o tempo e reamostra (muda o pitch), corrige o
+// envelope do trato vocal quadro a quadro (muda os formantes, independente do
+// pitch), ajusta brilho, nasalidade e anel, e acrescenta vibrato, raspagem e ar.
+// Nao e clonagem neural: e uma troca de timbre, no espirito do resto do app
+// (HPSS, cortes de banda, KARA 2).
+//
+// Tres coisas impedem o som de "phase vocoder":
+//  - phase locking por identidade (Laroche & Dolson): os bins em volta de cada
+//    pico mantem a relacao de fase medida na analise, entao o overlap-add nao
+//    soa liquido;
+//  - reset de fase nos ataques (fluxo espectral): consoantes e inicios de nota
+//    mantem a definicao em vez de um pre-eco de 20-40 ms;
+//  - envelope remedido a cada quadro (cepstro com lifter que acompanha o F0),
+//    entao os formantes de cada vogal se movem de verdade, em vez de um EQ fixo.
 
 /** Janela de analise/sintese. */
 export const VOICE_FFT = 2048;
@@ -36,6 +45,8 @@ export interface VoiceStats {
   tilt: number;
   /** Fracao do audio considerada vozada. */
   voicedRatio: number;
+  /** RMS mediano dos quadros com voz — referencia para nao bombar o silencio. */
+  rms: number;
   /** Classificacao grosseira pelo F0, usada como base para os formantes. */
   sex: VoiceSex;
   /** Envelope medio do trato vocal (dB por bin), ja suavizado. */
@@ -88,10 +99,6 @@ function interpolate(values: Float32Array, index: number): number {
   const i = Math.floor(index);
   const frac = index - i;
   return values[i] * (1 - frac) + values[i + 1] * frac;
-}
-
-function envelopeLinear(values: Float32Array, index: number): number {
-  return Math.pow(10, interpolate(values, index) / 20);
 }
 
 /**
@@ -215,6 +222,7 @@ export function analyzeVoiceStats(
     f0High: 0,
     tilt: 0,
     voicedRatio: 0,
+    rms: 0,
     sex: "media",
     envelopeDb,
     notes: 0,
@@ -276,14 +284,19 @@ export function analyzeVoiceStats(
   const sum = new Float64Array(half + 1);
   let count = 0;
   let active = 0;
+  let rmsSum = 0;
   for (let f = 0; f < frames; f++) {
     active += marks[f];
     if (active <= 0) continue;
     const start = f * VOICE_HOP;
+    let frameEnergy = 0;
     for (let i = 0; i < VOICE_FFT; i++) {
-      re[i] = mono[start + i] * window[i];
+      const sample = mono[start + i];
+      frameEnergy += sample * sample;
+      re[i] = sample * window[i];
       im[i] = 0;
     }
+    rmsSum += Math.sqrt(frameEnergy / VOICE_FFT);
     fft(re, im);
     for (let k = 0; k <= half; k++) {
       const magnitude = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
@@ -293,6 +306,7 @@ export function analyzeVoiceStats(
   }
   if (count === 0) return stats;
 
+  stats.rms = rmsSum / count;
   for (let k = 0; k <= half; k++) envelopeDb[k] = sum[k] / count;
   smoothEnvelope(envelopeDb);
   stats.tilt = measureTilt(envelopeDb, sampleRate);
@@ -320,6 +334,109 @@ function peakGain(hz: number, center: number, q: number): number {
   return 1 / (1 + x * x);
 }
 
+/**
+ * Passa-baixas de fase zero (biquad RBJ aplicado para frente e para tras).
+ * Entra antes da reamostragem que sobe o tom: sem ele, todo o conteudo acima de
+ * Nyquist/pitch volta espelhado como um chiado metalico — o defeito mais obvio
+ * quando a voz sobe uma oitava.
+ */
+function antiAlias(values: Float32Array, sampleRate: number, cutoff: number): void {
+  if (cutoff >= sampleRate * 0.45) return;
+  const w = (2 * Math.PI * cutoff) / sampleRate;
+  const cos = Math.cos(w);
+  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+  const a0 = 1 + alpha;
+  const b0 = ((1 - cos) / 2) / a0;
+  const b1 = (1 - cos) / a0;
+  const b2 = b0;
+  const a1 = (-2 * cos) / a0;
+  const a2 = (1 - alpha) / a0;
+  for (let pass = 0; pass < 2; pass++) {
+    let x1 = 0;
+    let x2 = 0;
+    let y1 = 0;
+    let y2 = 0;
+    for (let n = 0; n < values.length; n++) {
+      const i = pass === 0 ? n : values.length - 1 - n;
+      const x = values[i];
+      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = y;
+      values[i] = y;
+    }
+  }
+}
+
+/**
+ * Envelope do trato vocal de UM quadro (cepstro real + lifter), em dB. Diferente
+ * do envelope medio medido na analise, este acompanha cada vogal: e o que faz o
+ * formante mudar de verdade quando o timbre muda, em vez de aplicar um EQ fixo.
+ */
+function frameEnvelopeDb(
+  magnitude: Float32Array,
+  out: Float32Array,
+  re: Float32Array,
+  im: Float32Array,
+  cut: number,
+): void {
+  const size = re.length;
+  const half = size >> 1;
+  for (let k = 0; k <= half; k++) {
+    const value = 20 * Math.log10(magnitude[k] + 1e-7);
+    out[k] = value;
+    re[k] = value;
+    if (k > 0 && k < half) re[size - k] = value;
+  }
+  im.fill(0);
+  fft(re, im);
+  for (let q = 0; q < size; q++) re[q] /= size;
+  for (let q = cut + 1; q < size - cut; q++) re[q] = 0;
+  im.fill(0);
+  fft(re, im);
+  for (let k = 0; k <= half; k++) out[k] = re[k];
+}
+
+/**
+ * Identity phase locking (Laroche & Dolson): dentro da regiao de cada pico, a
+ * fase de sintese dos bins vizinhos acompanha a do pico, mantendo a diferenca
+ * de fase medida na analise. Sem isso o overlap-add soma senoides com fases
+ * arbitrarias e sobra o timbre "liquido"/metalico classico do phase vocoder.
+ */
+function lockPhases(
+  magnitude: Float32Array,
+  analysisPhase: Float32Array,
+  synthesisPhase: Float32Array,
+  half: number,
+): void {
+  let max = 0;
+  for (let k = 0; k <= half; k++) if (magnitude[k] > max) max = magnitude[k];
+  if (max <= 0) return;
+  const threshold = max * 0.01;
+  const peaks: number[] = [];
+  for (let k = 1; k < half; k++) {
+    if (
+      magnitude[k] > threshold &&
+      magnitude[k] > magnitude[k - 1] &&
+      magnitude[k] >= magnitude[k + 1]
+    ) {
+      peaks.push(k);
+    }
+  }
+  for (let i = 0; i < peaks.length; i++) {
+    const peak = peaks[i];
+    const from = i === 0 ? 0 : (peaks[i - 1] + peak) >> 1;
+    const to = i === peaks.length - 1 ? half : (peak + peaks[i + 1]) >> 1;
+    const base = synthesisPhase[peak];
+    const offset = analysisPhase[peak];
+    for (let k = from; k < to; k++) {
+      if (k === peak) continue;
+      synthesisPhase[k] = base + (analysisPhase[k] - offset);
+    }
+  }
+}
+
 function morphChannel(
   input: Float32Array,
   plan: VoicePlan,
@@ -340,28 +457,59 @@ function morphChannel(
   // overlap-add cancela quase tudo.
   const analysisHop = pitch > 1.35 ? VOICE_HOP >> 1 : VOICE_HOP;
   const synthesisHop = Math.max(1, Math.round(analysisHop * pitch));
+  // O salto de sintese e inteiro, entao a razao real do esticamento nao e
+  // exatamente o `pitch` do plano. Usar a razao real na reamostragem evita um
+  // desvio que cresce com o tempo (0,1% ja viram 24 ms em 27 s) e deixa a voz
+  // fora de sincronia com o instrumental no fim da musica.
+  const rate = synthesisHop / analysisHop;
   const frames = Math.max(1, Math.floor((total - size) / analysisHop) + 1);
-  const stretched = new Float32Array(frames * synthesisHop + size);
+  // Meia janela de folga na frente: a fase da janela faz o conteudo do quadro
+  // "andar" para tras quando o tom desce, e sem essa folga o inicio do audio
+  // sairia cortado.
+  const pad = half;
+  const stretched = new Float32Array(pad + frames * synthesisHop + size);
   const norm = new Float32Array(stretched.length);
 
-  // Ganho fixo por bin, no dominio de entrada. O esticamento nao mexe no
-  // envelope; a reamostragem escala tudo por r, entao o alvo e o envelope de
-  // origem avaliado em r*k/formantRatio. Brilho e EQ entram na frequencia final.
-  const gain = new Float32Array(half + 1);
+  // Brilho e EQ sao ganhos fixos por bin (nao dependem da vogal). O termo dos
+  // formantes e recalculado a cada quadro, logo abaixo.
+  const eqDb = new Float32Array(half + 1);
   for (let k = 0; k <= half; k++) {
     const finalHz = k * binHz * pitch;
-    const target = interpolate(stats.envelopeDb, (k * pitch) / plan.formantRatio);
-    const own = interpolate(stats.envelopeDb, k);
-    let db = target - own;
-    db += plan.tiltDelta * Math.log2(Math.max(finalHz, 40) / 1000);
+    let db = plan.tiltDelta * Math.log2(Math.max(finalHz, 40) / 1000);
     db += peakGain(finalHz, 1000, 1.2) * plan.nasalDb;
     db += peakGain(finalHz, 2900, 1.5) * plan.ringDb;
-    gain[k] = Math.pow(10, clamp(db, -18, 18) / 20);
+    eqDb[k] = db;
   }
+
+  // Tabela dB -> ganho (passo de 0,1 dB): evita um Math.pow por bin por quadro.
+  const tableLow = -18;
+  const tableStep = 10;
+  const gainTable = new Float32Array(361);
+  for (let i = 0; i < gainTable.length; i++) gainTable[i] = Math.pow(10, (tableLow + i / tableStep) / 20);
+  const gainAt = (db: number): number => {
+    const index = Math.round((db - tableLow) * tableStep);
+    return gainTable[index < 0 ? 0 : index >= gainTable.length ? gainTable.length - 1 : index];
+  };
+  // O lifter do cepstro precisa ficar abaixo do periodo da voz (senao o
+  // envelope acompanha os harmonicos), mas o mais alto possivel para nao
+  // achatar os formantes. A altura medida da voz da a escala.
+  const envelopeCut = clamp(
+    Math.round((0.7 * sampleRate) / Math.max(stats.f0 > 0 ? stats.f0 : 180, 70)),
+    90,
+    140,
+  );
+
+  const warp = Math.abs(plan.formantRatio - 1) > 0.002 || Math.abs(pitch - 1) > 0.002;
 
   const re = new Float32Array(size);
   const im = new Float32Array(size);
+  const envDb = new Float32Array(half + 1);
+  const envRe = new Float32Array(size);
+  const envIm = new Float32Array(size);
+  const smoothDb = new Float32Array(half + 1);
+  smoothDb.set(eqDb);
   const magnitude = new Float32Array(half + 1);
+  const previousMagnitude = new Float32Array(half + 1);
   const phase = new Float32Array(half + 1);
   const frequency = new Float32Array(half + 1);
   const previousPhase = new Float32Array(half + 1);
@@ -373,11 +521,17 @@ function morphChannel(
   const advance = (2 * Math.PI * synthesisHop) / sampleRate;
   const wrap = 2 * Math.PI;
   const noiseGate = 1e-4;
+  const referenceRms = stats.rms > 0 ? stats.rms : 0;
   let seed = 0x2f6e2b1;
   const random = () => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 4294967296;
   };
+
+  // Gate de voz: sem isso, o ganho de formante (que pode chegar a +15 dB)
+  // levanta o piso de ruido nos intervalos e a voz fica chiando entre as frases.
+  let gate = 1;
+  let floorLevel = 0;
 
   for (let f = 0; f < frames; f++) {
     if (isCancelled?.()) return new Float32Array(total);
@@ -409,6 +563,22 @@ function morphChannel(
       previousPhase[k] = p;
     }
 
+    // Ataque: reinicia a fase na fase medida. Sem isso o OLA continua a fase
+    // do quadro anterior e o transiente (consoante, ataque de nota) chega
+    // borrado, com um "pre-eco" de 20-40 ms.
+    let attack = 0;
+    if (f > 0) {
+      let diff = 0;
+      let sum = 0;
+      for (let k = 0; k <= half; k++) {
+        const delta = magnitude[k] - previousMagnitude[k];
+        if (delta > 0) diff += delta;
+        sum += magnitude[k];
+      }
+      attack = diff / (sum + 1e-9);
+    }
+    previousMagnitude.set(magnitude);
+
     // Sintese: aplica o ganho (formantes/brilho/EQ) e acumula a fase na
     // frequencia instantanea — com vibrato. O pitch em si vem da reamostragem.
     const seconds = (start + size / 2) / sampleRate;
@@ -416,28 +586,65 @@ function morphChannel(
       ? Math.pow(2, (plan.vibratoCents * Math.sin(wrap * plan.vibratoHz * seconds)) / 1200)
       : 1;
     const breathe = breathOn && rms > noiseGate;
-    if (f === 0) {
+
+    if (warp) {
+      frameEnvelopeDb(magnitude, envDb, envRe, envIm, envelopeCut);
+      let frameMax = 0;
+      for (let k = 0; k <= half; k++) if (magnitude[k] > frameMax) frameMax = magnitude[k];
+      floorLevel = frameMax * 0.003;
+      gate = referenceRms > 0 ? clamp((rms / referenceRms - 0.04) / 0.12, 0, 1) : 1;
+      // O vibrato escala todas as frequencias do quadro; dividir o formante por
+      // ele mantem os formantes parados enquanto o tom oscila (vibrato natural,
+      // sem "wow" de fita).
+      const formant = plan.formantRatio / vibrato;
+      for (let k = 0; k <= half; k++) {
+        let db = eqDb[k];
+        if (magnitude[k] > floorLevel) {
+          db += interpolate(envDb, (k * rate) / formant) - envDb[k];
+        }
+        // Suaviza no tempo (~30 ms) para o ganho nao piscar a cada quadro.
+        smoothDb[k] += (db - smoothDb[k]) * 0.35;
+      }
+    }
+
+    if (f === 0 || attack > 0.5) {
+      // Comeco absoluto ou ataque: a fase de sintese volta a ser a da analise.
       for (let k = 0; k <= half; k++) accumulated[k] = phase[k];
+      if (f > 0) lockPhases(magnitude, phase, accumulated, half);
     } else {
       for (let k = 0; k <= half; k++) {
         accumulated[k] += advance * interpolate(frequency, k) * vibrato;
       }
+      lockPhases(magnitude, phase, accumulated, half);
     }
     for (let k = 0; k <= half; k++) {
-      const level = magnitude[k] * gain[k];
+      let gain: number;
+      if (warp) {
+        gain = gainAt(clamp(smoothDb[k], -15, 15));
+        if (gain > 1) {
+          // Nunca realca o que esta abaixo do piso do proprio quadro (ruido
+          // entre harmonicos e silencio), nem quando a voz esta fraca.
+          if (magnitude[k] <= floorLevel) gain = 1;
+          else if (gate < 1) gain = 1 + (gain - 1) * gate;
+        }
+      } else {
+        gain = gainAt(clamp(eqDb[k], -15, 15));
+      }
+      const level = magnitude[k] * gain;
       const angle = accumulated[k];
       let r = level * Math.cos(angle);
       let i = level * Math.sin(angle);
       if (breathe) {
-        // Ruido aspirado, moldado pelo trato vocal de destino.
-        const amount =
-          plan.breath *
-          envelopeLinear(stats.envelopeDb, (k * pitch) / plan.formantRatio) *
-          0.3 *
-          random();
-        const theta = random() * wrap;
-        r += amount * Math.cos(theta);
-        i += amount * Math.sin(theta);
+        // Ruido aspirado, moldado pelo trato vocal de destino. A escala vem da
+        // magnitude DESTE quadro (nao do envelope medio da voz): no silencio e
+        // nos trechos fracos o sopro acompanha o sinal e nao sobe o piso.
+        const hz = k * binHz;
+        if (hz > 250 && hz < 8000) {
+          const amount = plan.breath * magnitude[k] * 0.25 * random();
+          const theta = random() * wrap;
+          r += amount * Math.cos(theta);
+          i += amount * Math.sin(theta);
+        }
       }
       re[k] = r;
       im[k] = i;
@@ -450,7 +657,7 @@ function morphChannel(
     // Inversa (a saida e real: basta reverter o indice da FFT direta).
     fft(re, im);
     for (let i = 0; i < size; i++) time[i] = re[(size - i) & (size - 1)] / size;
-    const placed = f * synthesisHop;
+    const placed = pad + f * synthesisHop;
     for (let i = 0; i < size; i++) {
       stretched[placed + i] += time[i] * window[i];
       norm[placed + i] += window[i] * window[i];
@@ -460,27 +667,29 @@ function morphChannel(
   }
 
   for (let i = 0; i < stretched.length; i++) {
-    const weight = norm[i];
-    if (weight > 1e-6) stretched[i] /= weight;
+    // Onde a janela ainda nao tem cobertura cheia (pontas), dividir pelo norm
+    // cru explodiria o pouco sinal que existe ali. Limitar o divisor deixa a
+    // ponta apenas mais baixa, que e o fade-in/fade-out natural do OLA.
+    if (norm[i] > 0) stretched[i] /= Math.max(norm[i], 0.5);
   }
 
-  // Rampas nas pontas: fora do miolo o overlap-add ainda nao tem cobertura
-  // completa e dividir pelo norm exageraria o pouco sinal que existe ali — era
-  // dali que saiam os picos que depois derrubavam o nivel inteiro.
-  const fade = Math.min(size, stretched.length >> 1);
-  for (let i = 0; i < fade; i++) {
-    const ramp = i / fade;
-    stretched[i] *= ramp;
-    stretched[stretched.length - 1 - i] *= ramp;
-  }
+  // Antes de reamostrar para cima, corta o que passaria de Nyquist: o Hermite
+  // nao filtra, so interpola, e o que sobra volta espelhado como chiado.
+  if (rate > 1.001) antiAlias(stretched, sampleRate, 0.45 * (sampleRate / rate));
 
   // Reamostragem por r: sobe o pitch e devolve a duracao original. Hermite
   // cubica no lugar da linear: a linear funciona como um passa-baixas e come os
   // agudos da voz a cada salto de oitava.
+  //
+  // O deslocamento de meia janela e essencial: o conteudo do quadro fica
+  // centrado em f*hop + size/2, entao ler i*pitch puro adianta/atrasa o audio em
+  // (size/2)*(1/pitch - 1) amostras (23 ms numa oitava abaixo) e a voz sai
+  // flutuando em relacao ao instrumental.
   const out = new Float32Array(total);
   const last = stretched.length - 1;
+  const offset = pad * (2 - rate);
   for (let i = 0; i < total; i++) {
-    const position = i * pitch;
+    const position = offset + i * rate;
     const base = Math.floor(position);
     if (base + 2 >= stretched.length) break;
     const frac = position - base;
@@ -492,6 +701,14 @@ function morphChannel(
     const a1 = y0 - 2.5 * y1 + 2 * y2 - 0.5 * y3;
     const a2 = -0.5 * y0 + 0.5 * y2;
     out[i] = ((a0 * frac + a1) * frac + a2) * frac + y1;
+  }
+
+  // Rampa curta nas pontas so para nao estalar no comeco/fim.
+  const fade = Math.min(Math.round(0.003 * sampleRate), total >> 1);
+  for (let i = 0; i < fade; i++) {
+    const ramp = i / fade;
+    out[i] *= ramp;
+    out[total - 1 - i] *= ramp;
   }
   return out;
 }
@@ -554,7 +771,7 @@ function matchLevel(reference: Float32Array, left: Float32Array, right: Float32A
     outEnergy += mid * mid;
   }
   if (refEnergy <= 0 || outEnergy <= 0) return;
-  const scale = clamp(Math.sqrt(refEnergy / outEnergy), 0.5, 2);
+  const scale = clamp(Math.sqrt(refEnergy / outEnergy), 0.25, 4);
   for (let i = 0; i < left.length; i++) {
     left[i] *= scale;
     right[i] *= scale;

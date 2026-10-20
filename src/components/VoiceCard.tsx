@@ -354,6 +354,7 @@ function emptyStats(): VoiceStats {
     f0High: 0,
     tilt: 0,
     voicedRatio: 0,
+    rms: 0,
     sex: "media",
     envelopeDb: EMPTY_ENVELOPE,
     notes: 0,
