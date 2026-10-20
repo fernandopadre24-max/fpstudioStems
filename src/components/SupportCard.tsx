@@ -5,7 +5,6 @@ import {
   PIX_BANK,
   PIX_CITY,
   PIX_KEY,
-  PIX_KEY_LABEL,
   PIX_RECEIVER,
 } from "../lib/pix";
 
@@ -36,6 +35,17 @@ export function SupportCard({ onClose }: SupportCardProps) {
   const payload = useMemo(() => buildPixPayload(), []);
   const qr = useMemo(() => buildPixQr(), []);
   const [copied, setCopied] = useState<"key" | "payload" | null>(null);
+
+  const maskedKey = useMemo(() => {
+    const v = PIX_KEY.replace(/\D/g, "");
+    if (v.length === 11) {
+      return `***.***.${v.slice(6, 9)}-${v.slice(9, 11)}`;
+    }
+    if (v.length >= 4) {
+      return `***${v.slice(-4)}`;
+    }
+    return v;
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
