@@ -1,4 +1,4 @@
-import { useSimplePlayer } from "../hooks/useSimplePlayer";
+import { useSimplePlayer, type SimplePlayer } from "../hooks/useSimplePlayer";
 import { formatTime } from "../lib/audio";
 import { Waveform } from "./Waveform";
 
@@ -12,6 +12,8 @@ interface PlayerCardProps {
   onActivate: () => void;
   onDownload?: () => void;
   downloadLabel?: string;
+  /** Tocador externo: permite a outras telas (cifra, partitura) dar play no mesmo card. */
+  player?: SimplePlayer;
 }
 
 export function PlayerCard({
@@ -24,12 +26,10 @@ export function PlayerCard({
   onActivate,
   onDownload,
   downloadLabel = "WAV",
+  player: sharedPlayer,
 }: PlayerCardProps) {
-  const { playing, position, duration, toggle, seek } = useSimplePlayer(
-    buffer,
-    active,
-    onActivate,
-  );
+  const ownPlayer = useSimplePlayer(buffer, active, onActivate);
+  const { playing, position, duration, toggle, seek } = sharedPlayer ?? ownPlayer;
   const progress = duration > 0 ? position / duration : 0;
 
   return (
@@ -82,6 +82,26 @@ export function PauseIcon() {
       <rect x="6" y="5" width="4" height="14" rx="1" />
       <rect x="14" y="5" width="4" height="14" rx="1" />
     </svg>
+  );
+}
+
+/** Play/Pausar da musica completa, reutilizavel em outras telas (cifra, partitura). */
+export function MusicPlayButton({
+  playing,
+  onToggle,
+  disabled,
+  label = "Ouvir musica",
+}: {
+  playing: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+  label?: string;
+}) {
+  return (
+    <button type="button" className="btn btn-play" onClick={onToggle} disabled={disabled}>
+      {playing ? <PauseIcon /> : <PlayIcon />}
+      {playing ? "Pausar" : label}
+    </button>
   );
 }
 

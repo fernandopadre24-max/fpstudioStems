@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PlayerCard } from "./components/Cards";
+import { MusicPlayButton, PlayerCard } from "./components/Cards";
 import { CifraSheet } from "./components/CifraSheet";
 import { DropZone } from "./components/DropZone";
 import { Editor, type Selection } from "./components/Editor";
 import { SupportCard } from "./components/SupportCard";
 import { YouTubeSearch } from "./components/YouTubeSearch";
 import { useMixer, type MixerTrack } from "./hooks/useMixer";
+import { useSimplePlayer } from "./hooks/useSimplePlayer";
 import { useVoiceDemo } from "./hooks/useVoiceDemo";
 import {
   audioExtension,
@@ -65,6 +66,15 @@ import { buildMusicXml } from "./lib/musicxml";
 import type { WorkerResponse } from "./lib/protocol";
 import { assessReading, buildAbc, buildScore, type Score } from "./lib/score";
 import { SeparationEngine } from "./lib/separationClient";
+import {
+  isPercussionStem,
+  pairToBuffer,
+  tomFileSuffix,
+  tomLabel,
+  transposeStereo,
+  type AudioPair,
+} from "./lib/tom";
+import { transposeNote } from "./lib/transpose";
 import { ScoreView } from "./components/ScoreView";
 import { VoiceCard, type VoicePreview } from "./components/VoiceCard";
 import { applyVoice, measureVoice, type VoiceJob } from "./lib/voiceClient";
@@ -91,6 +101,68 @@ const GPU_BROKEN_KEY = "stemroller.gpuBroken";
 
 const VOCAL_STEM_IDS: StemId[] = ["vocals", "leadVocal", "backingVocal"];
 const isVocalStem = (id: StemId): boolean => VOCAL_STEM_IDS.includes(id);
+
+// --- Tom da musica ---
+//
+// O tom escolhido vale para tudo o que sai de audio (trilhas, voz
+// transformada e misturas), exceto bateria e percussao, que nao tem tom. O
+// processamento roda no worker em paralelo e reaproveita o que ja foi feito
+// para as mesmas fontes.
+
+interface VoiceResult {
+  left: Float32Array;
+  right: Float32Array;
+  peaks: Float32Array;
+  label: string;
+}
+
+interface TomAudio {
+  semitones: number;
+  /** Trilhas processadas a partir destes resultados (null = nao processadas). */
+  stemsSource: ResultStem[] | null;
+  stems: Map<StemId, AudioPair>;
+  /** Mistura de original/instrumental montada a partir destes resultados. */
+  mixSource: ResultStem[] | null;
+  original: AudioBuffer | null;
+  instrumental: AudioBuffer | null;
+  /** "Original" direto do arquivo, quando ainda nao ha separacao. */
+  decodeSource: DecodedAudio | null;
+  /** Voz transformada reprocessada no tom novo. */
+  voiceSource: VoiceResult | null;
+  voice: AudioPair | null;
+}
+
+/** Trilhas processadas em paralelo: cada worker roda o phase vocoder. */
+const TOM_SLOTS = 3;
+
+/** Soma as trilhas: melodia no tom novo, percussao e vocais conforme pedido. */
+function buildTomMix(
+  stems: ResultStem[],
+  tom: Map<StemId, AudioPair>,
+  instrumentalOnly: boolean,
+): AudioBuffer | null {
+  const length = stems[0]?.left.length ?? 0;
+  if (length <= 0) return null;
+  const left = new Float32Array(length);
+  const right = new Float32Array(length);
+  for (const stem of stems) {
+    if (instrumentalOnly && isVocalStem(stem.id)) continue;
+    const audio = tom.get(stem.id) ?? stem;
+    for (let i = 0; i < length; i++) {
+      left[i] += audio.left[i];
+      right[i] += audio.right[i];
+    }
+  }
+  return pairToBuffer({ left, right });
+}
+
+/** Rotulo do tom detectado ja no tom escolhido ("G maior" + 2 = "A maior"). */
+function shiftKeyLabel(label: string, semitones: number): string {
+  if (!semitones) return label;
+  const [root, mode] = label.split(" ");
+  if (!root) return label;
+  return `${transposeNote(root, semitones)}${mode ? ` ${mode}` : ""}`;
+}
 
 interface SeparationProgress {
   chunk: number;
@@ -136,6 +208,12 @@ export default function App() {
   const [gpuBlocked, setGpuBlocked] = useState<boolean>(readGpuBlocked);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [exportFormat, setExportFormat] = useState<AudioFormat>("wav");
+  // Tom da musica (semitons): muda voz e instrumentos de harmonia; bateria e
+  // percussao ficam onde estao. Vale para tocador, downloads e cifra.
+  const [semitones, setSemitones] = useState(0);
+  const [tomAudio, setTomAudio] = useState<TomAudio | null>(null);
+  const [tomProgress, setTomProgress] = useState<number | null>(null);
+  const [tomError, setTomError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<TrackAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [trackMeta, setTrackMeta] = useState<{ title: string; artist: string } | null>(null);
@@ -171,12 +249,7 @@ export default function App() {
   const [voiceStatus, setVoiceStatus] = useState<"idle" | "working">("idle");
   const [voiceProgress, setVoiceProgress] = useState<number | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [voiceResult, setVoiceResult] = useState<{
-    left: Float32Array;
-    right: Float32Array;
-    peaks: Float32Array;
-    label: string;
-  } | null>(null);
+  const [voiceResult, setVoiceResult] = useState<VoiceResult | null>(null);
   const [voicePreview, setVoicePreview] = useState<VoicePreview | null>(null);
   const activateVoiceDemo = useCallback(() => setActivePlayback("voiceDemo"), []);
   // Previa de timbre da galeria: toca a gravacao humana real daquele perfil,
@@ -202,9 +275,16 @@ export default function App() {
   const pendingScoreRef = useRef<string | null>(null);
   // Transformacao de voz em andamento (para poder cancelar).
   const voiceJobRef = useRef<VoiceJob | null>(null);
+  // Troca de tom em andamento: o run id desarma um batch antigo sem corrida
+  // de estado (o cancelamento so termina quando a worker devolver null).
+  const tomRunRef = useRef(0);
+  const tomJobsRef = useRef<VoiceJob[]>([]);
 
   const decodedRef = useRef<DecodedAudio | null>(null);
   decodedRef.current = decoded;
+
+  const tomAudioRef = useRef<TomAudio | null>(null);
+  tomAudioRef.current = tomAudio;
 
   const identity = useMemo(
     () => (file ? identifyTrack(file.name, trackMeta) : { title: "", artist: "" }),
@@ -239,6 +319,7 @@ export default function App() {
 
   const applyResults = useCallback((stems: ResultStem[]) => {
     setResults(stems);
+    setTomAudio(null);
     setVoiceResult(null);
     setVoicePreview(null);
     setVoiceStats(null);
@@ -263,14 +344,208 @@ export default function App() {
     setActivePlayback(null);
   }, []);
 
+  // --- Troca de tom ---
+  //
+  // O batch roda quando o tom pedido muda, quando chega outra separacao e
+  // quando a voz transformada muda — sempre reaproveitando o que ja esta
+  // pronto para as mesmas fontes (trocar a voz nao refaz as trilhas). Sem
+  // stems, o proprio arquivo e que muda de tom.
+
+  const applyTom = useCallback(async () => {
+    const runId = ++tomRunRef.current;
+    for (const job of tomJobsRef.current) job.cancel();
+    tomJobsRef.current = [];
+    setTomError(null);
+
+    if (semitones === 0) {
+      setTomAudio((current) => (current ? null : current));
+      setTomProgress(null);
+      return;
+    }
+
+    // Separacao em andamento: esperar o resultado (o efeito roda de novo
+    // quando a fase muda) para nao brigar pela CPU com o modelo.
+    if (phase !== "ready" && phase !== "done") {
+      setTomProgress(null);
+      return;
+    }
+
+    const prev = tomAudioRef.current;
+    const same = prev && prev.semitones === semitones ? prev : null;
+    const needStems = Boolean(results) && (!same || same.stemsSource !== results);
+    const needDecode = !results && Boolean(decoded) && (!same || same.decodeSource !== decoded);
+    const needVoice = Boolean(results && voiceResult) && (!same || same.voiceSource !== voiceResult);
+
+    const stems: Map<StemId, AudioPair> = same && !needStems ? same.stems : new Map();
+    let voice: AudioPair | null = needVoice ? null : (same?.voice ?? null);
+    let decodedPair: AudioPair | null = null;
+
+    const items: {
+      key: string;
+      left: Float32Array;
+      right: Float32Array;
+      use: (output: AudioPair) => void;
+    }[] = [];
+    if (needStems && results) {
+      for (const stem of results) {
+        if (isPercussionStem(stem.id)) continue;
+        items.push({
+          key: `stem:${stem.id}`,
+          left: stem.left,
+          right: stem.right,
+          use: (output) => void stems.set(stem.id, output),
+        });
+      }
+    }
+    if (needVoice && voiceResult) {
+      items.push({
+        key: "voice",
+        left: voiceResult.left,
+        right: voiceResult.right,
+        use: (output) => {
+          voice = output;
+        },
+      });
+    }
+    if (needDecode && decoded) {
+      items.push({
+        key: "decode",
+        left: decoded.left,
+        right: decoded.right,
+        use: (output) => {
+          decodedPair = output;
+        },
+      });
+    }
+
+    // Sem nada a processar so vale a pena seguir se ainda falta montar a
+    // mistura (trilhas so de percussao nao levam tom); se ja esta tudo pronto,
+    // mexer no estado so recriaria os buffers e derrubaria a reproducao.
+    if (items.length === 0 && !needStems) {
+      setTomProgress(null);
+      return;
+    }
+
+    if (items.length > 0) {
+      const fractions = new Map<string, number>();
+      const report = () => {
+        if (tomRunRef.current !== runId) return;
+        let sum = 0;
+        for (const fraction of fractions.values()) sum += fraction;
+        setTomProgress(Math.min(1, sum / items.length));
+      };
+      setTomProgress(0);
+
+      const queue = [...items];
+      const slot = async (): Promise<void> => {
+        for (;;) {
+          if (tomRunRef.current !== runId) return;
+          const item = queue.shift();
+          if (!item) return;
+          fractions.set(item.key, 0);
+          const job = transposeStereo(
+            item.left,
+            item.right,
+            semitones,
+            SAMPLE_RATE,
+            (fraction) => {
+              fractions.set(item.key, fraction);
+              report();
+            },
+          );
+          tomJobsRef.current.push(job);
+          const output = await job.promise;
+          if (!output || tomRunRef.current !== runId) return;
+          fractions.set(item.key, 1);
+          report();
+          item.use(output);
+        }
+      };
+
+      try {
+        const slots = Math.min(TOM_SLOTS, items.length);
+        await Promise.all(Array.from({ length: slots }, () => slot()));
+      } catch (cause) {
+        if (tomRunRef.current !== runId) return;
+        setTomError(cause instanceof Error ? cause.message : String(cause));
+        setTomProgress(null);
+        return;
+      }
+      // Outra troca de tom assumiu a frente deste batch: nao publica nada.
+      if (tomRunRef.current !== runId) return;
+    }
+
+    // Mistura pronta para tocar e baixar: o que mudou de tom acompanha, a
+    // percussao nao (e os vocais entram na do "Original", como sempre).
+    let original: AudioBuffer | null;
+    let instrumental: AudioBuffer | null;
+    if (needStems && results) {
+      original = buildTomMix(results, stems, false);
+      instrumental = buildTomMix(results, stems, true);
+    } else {
+      original = needDecode && decodedPair ? pairToBuffer(decodedPair) : (same?.original ?? null);
+      instrumental = same?.instrumental ?? null;
+    }
+
+    setTomAudio({
+      semitones,
+      stemsSource: needStems ? results : (same?.stemsSource ?? null),
+      stems,
+      mixSource: needStems && results ? results : (same?.mixSource ?? null),
+      original,
+      instrumental,
+      decodeSource: needDecode && decodedPair ? decoded : (same?.decodeSource ?? null),
+      voiceSource: needVoice ? voiceResult : (same?.voiceSource ?? null),
+      voice,
+    });
+    setTomProgress(null);
+  }, [decoded, phase, results, semitones, voiceResult]);
+
+  useEffect(() => {
+    void applyTom();
+  }, [applyTom]);
+
+  // Desarma qualquer batch na desmontagem (nada aqui espera async).
+  useEffect(
+    () => () => {
+      tomRunRef.current += 1;
+      for (const job of tomJobsRef.current) job.cancel();
+      tomJobsRef.current = [];
+    },
+    [],
+  );
+
+  // Audio no tom novo so entra quando o batch terminou para as fontes atuais;
+  // antes disso tudo continua tocando e saindo no tom original.
+  const tomFresh = tomAudio && tomAudio.semitones === semitones ? tomAudio : null;
+  const activeStems = tomFresh && results && tomFresh.stemsSource === results ? tomFresh : null;
+  const activeMix = tomFresh && results && tomFresh.mixSource === results ? tomFresh : null;
+  const activeDecode =
+    tomFresh && !results && decoded && tomFresh.decodeSource === decoded ? tomFresh : null;
+  const activeVoice =
+    tomFresh && voiceResult && tomFresh.voiceSource === voiceResult ? tomFresh.voice : null;
+
+  // Tocador compartilhado da musica completa (o mesmo buffer do card Original).
+  // As outras telas (cifra/letra e partitura) usam esta mesma instancia, entao
+  // so toca uma faixa por vez e o playhead acompanha em qualquer tela.
+  const musicBuffer = activeMix?.original ?? activeDecode?.original ?? originalBuffer;
+  const musicPlayer = useSimplePlayer(
+    musicBuffer,
+    activePlayback === "original",
+    () => setActivePlayback("original"),
+  );
+  const toggleMusic = () => musicPlayer.toggle();
+
   const mixerTracks = useMemo<MixerTrack[] | null>(() => {
     if (!results) return null;
-    const tracks = results.map((stem) => ({ id: stem.id, left: stem.left, right: stem.right }));
-    if (voiceResult) {
-      tracks.push({ id: "clonedVocal", left: voiceResult.left, right: voiceResult.right });
-    }
+    const tracks = results.map((stem) => {
+      const audio = activeStems?.stems.get(stem.id) ?? stem;
+      return { id: stem.id, left: audio.left, right: audio.right };
+    });
+    const voice = activeVoice ?? voiceResult;
+    if (voice) tracks.push({ id: "clonedVocal", left: voice.left, right: voice.right });
     return tracks;
-  }, [results, voiceResult]);
+  }, [results, voiceResult, activeStems, activeVoice]);
 
   const mixer = useMixer(mixerTracks);
 
@@ -411,6 +686,7 @@ export default function App() {
       console.log('[App.handleFile] Received file:', next.name, next.size, next.type, 'meta:', meta);
       setError(null);
       setResults(null);
+      setTomAudio(null);
       setInstrumental(null);
       setInstrumentalPeaks(null);
       setOriginalBuffer(null);
@@ -455,6 +731,7 @@ export default function App() {
     if (!decoded) return;
     setError(null);
     setResults(null);
+    setTomAudio(null);
     setInstrumental(null);
     setInstrumentalPeaks(null);
     setSeparationProgress(null);
@@ -478,36 +755,47 @@ export default function App() {
       if (!results) return null;
       const stem = results.find((item) => item.id === id);
       if (!stem) return null;
-      return encodeAudio(stem.left, stem.right, exportFormat, { range: rangeSamples });
+      const audio = activeStems?.stems.get(id) ?? stem;
+      return encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples });
     },
-    [exportFormat, rangeSamples, results],
+    [activeStems, exportFormat, rangeSamples, results],
   );
 
   const downloadStem = useCallback(
     (id: StemId) => {
       const meta = STEMS.find((item) => item.id === id);
       const blob = stemBlob(id);
-      if (blob && meta) downloadBlob(blob, `${baseName} - ${meta.label}${corte}.${ext}`);
+      if (blob && meta) {
+        // O sufixo so aparece quando essa trilha de fato saiu no tom novo
+        // (percussao e bateria ficam no original e nao levam a marca).
+        const tom = activeStems?.stems.has(id) ? tomFileSuffix(semitones) : "";
+        downloadBlob(blob, `${baseName} - ${meta.label}${corte}${tom}.${ext}`);
+      }
     },
-    [baseName, corte, ext, stemBlob],
+    [activeStems, baseName, corte, ext, semitones, stemBlob],
   );
 
   const downloadInstrumental = useCallback(() => {
-    if (!instrumental) return;
+    const buffer = activeMix?.instrumental ?? instrumental;
+    if (!buffer) return;
     const blob = encodeAudio(
-      instrumental.getChannelData(0),
-      instrumental.getChannelData(1),
+      buffer.getChannelData(0),
+      buffer.getChannelData(1),
       exportFormat,
       { range: rangeSamples },
     );
-    downloadBlob(blob, `${baseName} - Instrumental${corte}.${ext}`);
-  }, [baseName, corte, exportFormat, ext, instrumental, rangeSamples]);
+    const tom = activeMix?.instrumental ? tomFileSuffix(semitones) : "";
+    downloadBlob(blob, `${baseName} - Instrumental${corte}${tom}.${ext}`);
+  }, [activeMix, baseName, corte, exportFormat, ext, instrumental, rangeSamples, semitones]);
 
   const downloadOriginal = useCallback(() => {
-    if (!decoded) return;
-    const blob = encodeAudio(decoded.left, decoded.right, exportFormat);
-    downloadBlob(blob, `${baseName}.${ext}`);
-  }, [baseName, decoded, exportFormat, ext]);
+    const buffer = activeMix?.original ?? activeDecode?.original ?? originalBuffer;
+    if (!buffer) return;
+    const blob = encodeAudio(buffer.getChannelData(0), buffer.getChannelData(1), exportFormat);
+    const tom =
+      activeMix?.original || activeDecode?.original ? tomFileSuffix(semitones) : "";
+    downloadBlob(blob, `${baseName}${tom}.${ext}`);
+  }, [activeDecode, activeMix, baseName, exportFormat, ext, originalBuffer, semitones]);
 
   // --- Troca de voz (morph de timbre) ---
 
@@ -609,12 +897,21 @@ export default function App() {
   }, []);
 
   const downloadVoice = useCallback(() => {
-    if (!voiceResult) return;
-    const blob = encodeAudio(voiceResult.left, voiceResult.right, exportFormat, {
-      range: rangeSamples,
-    });
-    downloadBlob(blob, `${baseName} - Voz transformada${corte}.${ext}`);
-  }, [baseName, corte, exportFormat, ext, rangeSamples, voiceResult]);
+    const audio = activeVoice ?? voiceResult;
+    if (!audio) return;
+    const blob = encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples });
+    const tom = activeVoice ? tomFileSuffix(semitones) : "";
+    downloadBlob(blob, `${baseName} - Voz transformada${corte}${tom}.${ext}`);
+  }, [
+    activeVoice,
+    baseName,
+    corte,
+    exportFormat,
+    ext,
+    rangeSamples,
+    semitones,
+    voiceResult,
+  ]);
 
   const searchOnlineLyrics = useCallback(async () => {
     if (!decoded) return;
@@ -1012,25 +1309,31 @@ export default function App() {
     for (const stem of results) {
       const meta = STEMS.find((item) => item.id === stem.id);
       if (!meta) continue;
+      const audio = activeStems?.stems.get(stem.id) ?? stem;
+      const tom = activeStems?.stems.has(stem.id) ? tomFileSuffix(semitones) : "";
       entries.push({
-        name: `${baseName} - ${meta.label}${corte}.${ext}`,
-        blob: encodeAudio(stem.left, stem.right, exportFormat, { range: rangeSamples }),
+        name: `${baseName} - ${meta.label}${corte}${tom}.${ext}`,
+        blob: encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples }),
       });
     }
-    if (voiceResult) {
+    const voice = activeVoice ?? voiceResult;
+    if (voice) {
+      const tom = activeVoice ? tomFileSuffix(semitones) : "";
       entries.push({
-        name: `${baseName} - Voz transformada${corte}.${ext}`,
-        blob: encodeAudio(voiceResult.left, voiceResult.right, exportFormat, {
+        name: `${baseName} - Voz transformada${corte}${tom}.${ext}`,
+        blob: encodeAudio(voice.left, voice.right, exportFormat, {
           range: rangeSamples,
         }),
       });
     }
-    if (instrumental) {
+    const mix = activeMix?.instrumental ?? instrumental;
+    if (mix) {
+      const tom = activeMix?.instrumental ? tomFileSuffix(semitones) : "";
       entries.push({
-        name: `${baseName} - Instrumental${corte}.${ext}`,
+        name: `${baseName} - Instrumental${corte}${tom}.${ext}`,
         blob: encodeAudio(
-          instrumental.getChannelData(0),
-          instrumental.getChannelData(1),
+          mix.getChannelData(0),
+          mix.getChannelData(1),
           exportFormat,
           { range: rangeSamples },
         ),
@@ -1068,7 +1371,7 @@ export default function App() {
     } finally {
       setZipState("idle");
     }
-  }, [baseName, chordSheet, cifraText, corte, exportFormat, ext, instrumental, lyricsLrc, lyricsText, rangeSamples, results, voiceResult]);
+  }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, instrumental, lyricsLrc, lyricsText, rangeSamples, results, semitones, voiceResult]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1219,9 +1522,13 @@ export default function App() {
                   <>
                     <span
                       className="chip chip-key"
-                      title={`Confianca: ${Math.round(analysis.key.confidence * 100)}%`}
+                      title={
+                        semitones !== 0
+                          ? `Tom original: ${analysis.key.label} · ajuste ${tomLabel(semitones)} semitom`
+                          : `Confianca: ${Math.round(analysis.key.confidence * 100)}%`
+                      }
                     >
-                      Tom: {analysis.key.label}
+                      Tom: {shiftKeyLabel(analysis.key.label, semitones)}
                     </span>
                     <span
                       className="chip chip-bpm"
@@ -1234,6 +1541,43 @@ export default function App() {
               </div>
             </div>
             <div className="file-actions">
+              <div
+                className="file-tone"
+                title="Troca o tom da música: voz e instrumentos de harmonia sobem ou descem por semitom (a cifra acompanha). Bateria e percussão ficam onde estão."
+              >
+                <span className="file-tone-label">Tom da música</span>
+                <div className="file-tone-btns">
+                  <button
+                    type="button"
+                    className="tone-mini-btn"
+                    onClick={() => setSemitones((value) => Math.max(-12, value - 1))}
+                    disabled={semitones <= -12}
+                    title="Descer meio tom"
+                  >
+                    −
+                  </button>
+                  <span className="file-tone-val">{tomLabel(semitones)}</span>
+                  <button
+                    type="button"
+                    className="tone-mini-btn"
+                    onClick={() => setSemitones((value) => Math.min(12, value + 1))}
+                    disabled={semitones >= 12}
+                    title="Subir meio tom"
+                  >
+                    +
+                  </button>
+                  {semitones !== 0 && (
+                    <button
+                      type="button"
+                      className="tone-mini-btn tone-mini-reset"
+                      onClick={() => setSemitones(0)}
+                      title="Voltar ao tom original"
+                    >
+                      original
+                    </button>
+                  )}
+                </div>
+              </div>
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -1244,6 +1588,7 @@ export default function App() {
                   setOriginalBuffer(null);
                   setOriginalPeaks(null);
                   setResults(null);
+                  setTomAudio(null);
                   setInstrumental(null);
                   setInstrumentalPeaks(null);
                   setPhase("idle");
@@ -1253,6 +1598,29 @@ export default function App() {
                 Trocar musica
               </button>
             </div>
+            {tomProgress !== null && (
+              <div className="file-tone-progress">
+                <div className="file-tone-progress-body">
+                  <div className="progress-label">
+                    Ajustando o tom {tomLabel(semitones)} · {Math.round(tomProgress * 100)}%
+                  </div>
+                  <div className="bar">
+                    <div
+                      className="bar-fill"
+                      style={{ width: `${Math.max(2, tomProgress * 100)}%` }}
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setSemitones(0)}
+                >
+                  Cancelar
+                </button>
+              </div>
+            )}
+            {tomError && <p className="source-note">{tomError}</p>}
           </section>
         )}
 
@@ -1271,12 +1639,17 @@ export default function App() {
             </div>
             <PlayerCard
               title="Original"
-              subtitle="Faixa completa como foi enviada"
+              subtitle={
+                activeMix?.original || activeDecode?.original
+                  ? `Faixa completa no tom ${tomLabel(semitones)}`
+                  : "Faixa completa como foi enviada"
+              }
               color="#8ea2c7"
               peaks={originalPeaks}
-              buffer={originalBuffer}
+              buffer={activeMix?.original ?? activeDecode?.original ?? originalBuffer}
               active={activePlayback === "original"}
               onActivate={() => setActivePlayback("original")}
+              player={musicPlayer}
               onDownload={downloadOriginal}
               downloadLabel={ext.toUpperCase()}
             />
@@ -1294,6 +1667,11 @@ export default function App() {
             </div>
 
             <div className="controls-row">
+              <MusicPlayButton
+                playing={musicPlayer.playing}
+                onToggle={toggleMusic}
+                disabled={!musicBuffer}
+              />
               <button
                 type="button"
                 className="btn btn-secondary"
@@ -1476,6 +1854,8 @@ export default function App() {
                   onDownloadTxt={lyricsTab === "lyrics" ? downloadLyricsTxt : downloadCifraClub}
                   onDownloadLrc={lyricsLrc ? downloadLyricsLrc : undefined}
                   hasLrc={Boolean(lyricsLrc)}
+                  semitones={semitones}
+                  onSemitones={setSemitones}
                 />
               </div>
             )}
@@ -1719,11 +2099,17 @@ export default function App() {
                 Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
                 cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
                 estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
-                Ao tocar os stems, uma linha marca o compasso que está soando.
+                Use o play acima (ou o do editor) para ouvir: uma linha marca o compasso que está
+                soando.
               </p>
             </div>
 
             <div className="controls-row">
+              <MusicPlayButton
+                playing={musicPlayer.playing}
+                onToggle={toggleMusic}
+                disabled={!musicBuffer}
+              />
               <label className="field">
                 <span>Voz / instrumento</span>
                 <select
@@ -1815,7 +2201,15 @@ export default function App() {
                 <ScoreView
                   abc={scoreAbc}
                   color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
-                  playhead={mixer.playing || mixer.position > 0 ? mixer.position : null}
+                  playhead={
+                    activePlayback === "original"
+                      ? musicPlayer.playing || musicPlayer.position > 0
+                        ? musicPlayer.position
+                        : null
+                      : mixer.playing || mixer.position > 0
+                        ? mixer.position
+                        : null
+                  }
                   playheadOffset={score.offset}
                   measureSeconds={score.measureSeconds}
                 />
@@ -1832,10 +2226,14 @@ export default function App() {
             </div>
             <PlayerCard
               title="Instrumental"
-              subtitle="Sem vocais — ideal para karaoke"
+              subtitle={
+                activeMix?.instrumental
+                  ? `Sem vocais — no tom ${tomLabel(semitones)}`
+                  : "Sem vocais — ideal para karaoke"
+              }
               color="#4ade80"
               peaks={instrumentalPeaks}
-              buffer={instrumental}
+              buffer={activeMix?.instrumental ?? instrumental}
               active={activePlayback === "instrumental"}
               onActivate={() => setActivePlayback("instrumental")}
               onDownload={downloadInstrumental}

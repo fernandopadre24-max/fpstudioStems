@@ -15,6 +15,10 @@ interface CifraSheetProps {
   onDownloadTxt?: () => void;
   onDownloadLrc?: () => void;
   hasLrc?: boolean;
+  /** Tom escolhido fora: quando vem de cima, o controle da cifra e o mesmo
+   *  da tela inicial — mudou o tom da musica, mudou para a cifra tambem. */
+  semitones?: number;
+  onSemitones?: (value: number) => void;
 }
 
 export function CifraSheet({
@@ -28,8 +32,18 @@ export function CifraSheet({
   onDownloadTxt,
   onDownloadLrc,
   hasLrc,
+  semitones: externalSemitones,
+  onSemitones: externalOnSemitones,
 }: CifraSheetProps) {
-  const [semitones, setSemitones] = useState(0);
+  const [internalSemitones, setInternalSemitones] = useState(0);
+  const semitones = externalSemitones ?? internalSemitones;
+  const setSemitones = useCallback(
+    (value: number) => {
+      if (externalOnSemitones) externalOnSemitones(value);
+      else setInternalSemitones(value);
+    },
+    [externalOnSemitones],
+  );
   const [fontSize, setFontSize] = useState(15);
   const [showTabs, setShowTabs] = useState(false);
   const [isMetronomeActive, setIsMetronomeActive] = useState(false);
@@ -111,18 +125,18 @@ export function CifraSheet({
     }
   }, [isMetronomeActive, strumming]);
 
-  // Transpose handlers
+  // Transpose handlers (mesmos limites do controle da tela inicial: ±12)
   const handleTransposeDown = useCallback(() => {
-    setSemitones((prev) => (prev <= -11 ? 0 : prev - 1));
-  }, []);
+    setSemitones(Math.max(-12, semitones - 1));
+  }, [semitones, setSemitones]);
 
   const handleTransposeUp = useCallback(() => {
-    setSemitones((prev) => (prev >= 11 ? 0 : prev + 1));
-  }, []);
+    setSemitones(Math.min(12, semitones + 1));
+  }, [semitones, setSemitones]);
 
   const handleResetTranspose = useCallback(() => {
     setSemitones(0);
-  }, []);
+  }, [setSemitones]);
 
   // Format lines for rendering
   const renderedContent = useMemo(() => {
@@ -291,7 +305,10 @@ export function CifraSheet({
       <div className="cifra-meta-header">
         <div className="cifra-meta-left">
           {/* Tone / Key Indicator */}
-          <div className="cifra-tone-control" title="Tom da música">
+          <div
+            className="cifra-tone-control"
+            title="Tom da música — vale para a cifra e para o áudio (voz e instrumentos; bateria e percussão ficam)"
+          >
             <span className="cifra-tone-label">Tom:</span>
             <span className="cifra-tone-val">{currentKey}</span>
             <div className="cifra-transpose-btns">

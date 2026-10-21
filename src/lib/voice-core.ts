@@ -914,3 +914,68 @@ export function morphVoice(
   matchLevel(mid, outLeft, outRight);
   return { left: outLeft, right: outRight };
 }
+
+// --- Troca de tom da musica inteira ---
+
+/**
+ * Plano para mudar o tom sem cor de timbre: so o pitch anda (em semitons) e o
+ * envelope do espectro fica preso na frequencia original. E o que faz a voz
+ * continuar sendo a mesma pessoa e os instrumentos continuarem com a mesma
+ * cor — como se tocassem outra nota no mesmo instrumento. A duracao nao muda
+ * (phase vocoder: estica e reamostra), entao as trilhas seguem em sincronia e
+ * a selecao A/B do editor continua valendo.
+ */
+export function transposePlan(semitones: number): VoicePlan {
+  return {
+    pitchRatio: Math.pow(2, clamp(semitones, -12, 12) / 12),
+    formantRatio: 1,
+    tiltDelta: 0,
+    vibratoCents: 0,
+    vibratoHz: 0,
+    rasp: 0,
+    breath: 0,
+    nasalDb: 0,
+    ringDb: 0,
+    power: 0,
+  };
+}
+
+/**
+ * Medida neutra para a troca de tom (nao mede a voz). O morph so consulta o
+ * `rms` (gate para nao bombar o ruido entre as frases) e o `f0` (altura do
+ * lifter do cepstro: o corte precisa ficar abaixo do periodo da nota, senao o
+ * envelope segura os harmonicos antigos e o som vira um pente).
+ */
+export function transposeStats(rms: number, f0 = 0): VoiceStats {
+  return {
+    f0,
+    f0Low: 0,
+    f0High: 0,
+    tilt: 0,
+    voicedRatio: 1,
+    rms,
+    sex: "media",
+    envelopeDb: new Float32Array(0),
+    notes: 0,
+  };
+}
+
+/** RMS medio de um par estereo numa passada so (alimenta o gate). */
+export function stereoRms(left: Float32Array, right: Float32Array): number {
+  const total = Math.min(left.length, right.length);
+  if (total <= 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < total; i++) {
+    sum += left[i] * left[i] + right[i] * right[i];
+  }
+  return Math.sqrt(sum / (2 * total));
+}
+
+/**
+ * F0 grosseira do sinal (0 quando nao acha nada). Serve so para calibrar o
+ * lifter do cepstro da troca de tom; o valor acaba cortado entre 90 e 140
+ * amostras, entao um chute ruim nao passa de um EQ um pouco diferente.
+ */
+export function estimatePitchHz(signal: Float32Array, sampleRate: number): number {
+  return estimateFundamental(signal, sampleRate);
+}

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+export type SimplePlayer = ReturnType<typeof useSimplePlayer>;
+
 export function useSimplePlayer(
   buffer: AudioBuffer | null,
   active: boolean,

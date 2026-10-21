@@ -411,6 +411,85 @@ body {
   margin-top: 8px;
 }
 
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* Troca de tom da musica (ao lado de "Trocar musica") */
+.file-tone {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.file-tone-label {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.file-tone-btns {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.file-tone-val {
+  min-width: 62px;
+  text-align: center;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.tone-mini-btn {
+  background: rgba(127, 127, 127, 0.09);
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  color: inherit;
+  border-radius: 6px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tone-mini-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tone-mini-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tone-mini-reset {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.file-tone-progress {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-tone-progress-body {
+  flex: 1;
+  min-width: 0;
+}
+
 .controls-row {
   display: flex;
   align-items: flex-end;
