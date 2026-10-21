@@ -80,13 +80,33 @@ function resolveCookieContent(): string | null {
   return looksLikeCookies(decoded) ? decoded : null;
 }
 
+function cookieSummary(content: string): string {
+  const names = new Set<string>();
+  let expired = 0;
+  const now = Math.floor(Date.now() / 1000);
+  for (const line of content.split(/\r?\n/)) {
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split("\t");
+    if (parts.length < 7) continue;
+    const name = parts[5];
+    const expiry = Number(parts[4]);
+    if (!name) continue;
+    names.add(name);
+    if (Number.isFinite(expiry) && expiry > 0 && expiry < now) expired++;
+  }
+  const login = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID"].filter(
+    (name) => names.has(name),
+  );
+  return `; ${names.size} cookies, ${login.length}/7 de login, ${expired} vencidos`;
+}
+
 function describeCookieValue(): string {
   const raw = process.env.YTDLP_COOKIES?.trim();
   if (!raw) return "cookies:nao (variavel ausente)";
   const resolved = resolveCookieContent();
   if (resolved) {
     const viaBase64 = !raw.includes("\t");
-    return `cookies:sim (${resolved.length} bytes${viaBase64 ? ", base64" : ""})`;
+    return `cookies:sim (${resolved.length} bytes${viaBase64 ? ", base64" : ""})${cookieSummary(resolved)}`;
   }
   if (/(Base64String|ReadAllBytes|IO\.File|Set-Clipboard|Convert\])/.test(raw)) {
     return "cookies:valor invalido (voce colou o COMANDO; rode-o e cole a SAIDA: o texto longo que aparece no PowerShell)";
@@ -700,6 +720,7 @@ export async function streamYouTubeAudio(
   id: string,
   response: ServerResponse,
   playerClient?: string,
+  noCookies = false,
 ): Promise<void> {
   const errors: string[] = [];
   await ensureCookies();
@@ -711,9 +732,9 @@ export async function streamYouTubeAudio(
   const preferInvidious = Boolean(process.env.VERCEL) && !ytProxy && !playerClient;
   if (preferInvidious) {
     if (await streamInvidiousAudio(id, response, errors)) return;
-    if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
+    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies)) return;
   } else {
-    if (await streamYtDlpAudio(id, response, errors, playerClient)) return;
+    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies)) return;
     if (await streamInvidiousAudio(id, response, errors)) return;
   }
   const joinedErrors = errors.join(" ");
@@ -721,11 +742,17 @@ export async function streamYouTubeAudio(
     /not a bot|no longer valid|rotated|Sign in to confirm/i.test(joinedErrors)
       ? " Dica: os cookies do YouTube podem estar expirados — exporte novamente logado no YouTube e rode o configurar-cookies."
       : "";
+  const important = errors
+    .filter((entry) => /^(yt-dlp|cookies|proxy)/.test(entry))
+    .slice(-3);
+  const detail = [...important, ...errors.slice(-2)].filter(
+    (entry, index, all) => all.indexOf(entry) === index,
+  );
   sendJson(response, 502, {
     error:
       "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio." +
       cookiesHint,
-    ...(errors.length ? { detail: errors.slice(-5).join(" | ") } : {}),
+    ...(detail.length ? { detail: detail.join(" | ") } : {}),
   });
 }
 
@@ -819,53 +846,27 @@ export function youtubeEnabled(): boolean {
   return process.env.YOUTUBE_ENABLED?.trim() !== "0";
 }
 
-async function streamYtDlpAudio(
-  id: string,
-  response: ServerResponse,
-  errors: string[] = [],
-  playerClient?: string,
-): Promise<boolean> {
-  let executable: string;
-  try {
-    executable = await ensureYtDlp();
-  } catch (cause) {
-    errors.push(`yt-dlp indisponivel: ${cause instanceof Error ? cause.message : String(cause)}`);
-    return false;
-  }
-  const cookies = await cookieArgs();
-  const pot = await potArgs();
-  const totalSize = await probeYtDlpSize(executable, cookies, id, playerClient);
-  return new Promise<boolean>((resolve) => {
-    const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
-    const child = spawn(
-      executable,
-      [
-        "-f",
-        "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-        "-o",
-        "-",
-        "--no-playlist",
-        "--no-warnings",
-        "--no-part",
-        ...runtimeArgs(),
-        ...clientArgs(playerClient),
-        ...pot,
-        ...proxyArgs(),
-        ...cookies,
-        watchUrl,
-      ],
-      { windowsHide: true, env: childEnv },
-    );
+interface YtDlpAttempt {
+  ok: boolean;
+  stderr: string;
+}
 
+function runYtDlpAttempt(
+  executable: string,
+  args: string[],
+  response: ServerResponse,
+  totalSize: number | null,
+): Promise<YtDlpAttempt> {
+  return new Promise((resolve) => {
+    const child = spawn(executable, args, { windowsHide: true, env: childEnv });
     let started = false;
     let stderr = "";
-    const contentType = "audio/webm";
 
     child.stdout.on("data", (chunk: Buffer) => {
       if (!started) {
         started = true;
         response.statusCode = 200;
-        response.setHeader("Content-Type", contentType);
+        response.setHeader("Content-Type", "audio/webm");
         response.setHeader("X-Stem-Source", "yt-dlp");
         response.setHeader("Cache-Control", "no-store");
         if (totalSize) response.setHeader("Content-Length", String(totalSize));
@@ -881,33 +882,88 @@ async function streamYtDlpAudio(
     child.on("error", (cause) => {
       if (started) {
         response.end();
-        resolve(true);
+        resolve({ ok: true, stderr });
       } else {
-        errors.push(`yt-dlp erro: ${cause.message}`);
-        resolve(false);
+        resolve({ ok: false, stderr: `${stderr} ${cause.message}`.trim() });
       }
     });
 
     child.on("close", () => {
       if (started) {
         response.end();
-        resolve(true);
+        resolve({ ok: true, stderr });
       } else {
-        const tail = stderr
-          .trim()
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .slice(-2)
-          .join(" ");
-        errors.push(`yt-dlp${cookies.length ? " (cookies)" : ""}: ${tail || "sem saida"}`);
-        resolve(false);
+        resolve({ ok: false, stderr });
       }
     });
 
-    response.on("close", () => {
+    response.once("close", () => {
       child.kill();
     });
   });
+}
+
+function stderrTail(stderr: string): string {
+  return (
+    stderr
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-2)
+      .join(" ") || "sem saida"
+  );
+}
+
+async function streamYtDlpAudio(
+  id: string,
+  response: ServerResponse,
+  errors: string[] = [],
+  playerClient?: string,
+  noCookies = false,
+): Promise<boolean> {
+  let executable: string;
+  try {
+    executable = await ensureYtDlp();
+  } catch (cause) {
+    errors.push(`yt-dlp indisponivel: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return false;
+  }
+  const cookies = noCookies ? [] : await cookieArgs();
+  const pot = await potArgs();
+  const totalSize = await probeYtDlpSize(executable, cookies, id, playerClient);
+  const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  const prefix = [
+    "-f",
+    "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+    "-o",
+    "-",
+    "--no-playlist",
+    "--no-warnings",
+    "--no-part",
+    ...runtimeArgs(),
+    ...clientArgs(playerClient),
+    ...pot,
+    ...proxyArgs(),
+  ];
+
+  const first = await runYtDlpAttempt(
+    executable,
+    [...prefix, ...cookies, watchUrl],
+    response,
+    totalSize,
+  );
+  if (first.ok) return true;
+  errors.push(`yt-dlp${cookies.length ? " (cookies)" : ""}: ${stderrTail(first.stderr)}`);
+
+  // Cookie vencido e pior que cookie nenhum: o YouTube trata a sessao como
+  // suspeita e pede login. Se o erro foi esse, tenta de novo sem cookies,
+  // apoiado so no PO token. Se o primeiro teste ja foi sem cookies, nao repete.
+  if (cookies.length && /sign in to confirm|not a bot/i.test(first.stderr)) {
+    const second = await runYtDlpAttempt(executable, [...prefix, watchUrl], response, totalSize);
+    if (second.ok) return true;
+    errors.push(`yt-dlp (sem cookies): ${stderrTail(second.stderr)}`);
+  }
+  return false;
 }
 
 export async function handleYouTubeApi(
@@ -957,7 +1013,8 @@ export async function handleYouTubeApi(
         return;
       }
       const playerClient = requestUrl.searchParams.get("client")?.trim() || undefined;
-      await streamYouTubeAudio(id, response, playerClient);
+      const noCookies = requestUrl.searchParams.get("nocookies") === "1";
+      await streamYouTubeAudio(id, response, playerClient, noCookies);
       return;
     }
 
