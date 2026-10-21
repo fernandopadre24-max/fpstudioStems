@@ -197,16 +197,17 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
             <strong>O YouTube bloqueou o download pelo servidor online.</strong>
             {hosted && (
               <span>
-                Este endereco (Vercel) usa um IP de datacenter e o YouTube exige login. Duas
-                saidas:
+                Este endereco (Vercel) usa um IP de datacenter, e o YouTube agora recusa esse IP
+                mesmo com cookies de login validos. Duas saidas:
               </span>
             )}
             <span>
-              1) Use o app rodando no seu PC (modo local/tunel) — o download sai pelo seu IP e
+              1) Use o app rodando no seu PC (modo local/tunel): o download sai pelo seu IP e
               funciona sempre.
             </span>
             <span>
-              2) Ou reexporte os cookies do YouTube estando logado e rode o configurar-cookies.
+              2) No link publico, configure um proxy residencial (YTDLP_PROXY) no servidor — ai o
+              download vale para todos os usuarios.
             </span>
             <span className="yt-block-detail">{error}</span>
           </div>

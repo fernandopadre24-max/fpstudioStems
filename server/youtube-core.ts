@@ -84,7 +84,9 @@ function cookieSummary(content: string): string {
   const names = new Set<string>();
   const expiredNames = new Set<string>();
   const now = Math.floor(Date.now() / 1000);
-  for (const line of content.split(/\r?\n/)) {
+  for (const rawLine of content.split(/\r?\n/)) {
+    // O formato Netscape marca cookies HttpOnly com "#HttpOnly_" na frente.
+    const line = rawLine.startsWith("#HttpOnly_") ? rawLine.slice("#HttpOnly_".length) : rawLine;
     if (!line || line.startsWith("#")) continue;
     const parts = line.split("\t");
     if (parts.length < 7) continue;
@@ -751,10 +753,13 @@ export async function streamYouTubeAudio(
     if (await streamInvidiousAudio(id, response, errors)) return;
   }
   const joinedErrors = errors.join(" ");
-  const cookiesHint =
-    /not a bot|no longer valid|rotated|Sign in to confirm/i.test(joinedErrors)
-      ? " Dica: os cookies do YouTube podem estar expirados — exporte novamente logado no YouTube e rode o configurar-cookies."
-      : "";
+  // O cookie de login do YouTube esta valido (o resumo mostra os 10/10), mas o
+  // YouTube recusa o IP de datacenter da Vercel. Reexportar cookie nao resolve;
+  // a saida e um proxy residencial ou o modo local/tunel.
+  const ipBlocked = /not a bot|Sign in to confirm|no longer valid|rotated/i.test(joinedErrors);
+  const blockHint = ipBlocked
+    ? " O cookie de login esta valido: o bloqueio e pelo IP do servidor (Vercel). Use o modo local/tunel ou configure um proxy residencial (YTDLP_PROXY) no servidor."
+    : "";
   const cookieEntry = errors.find((entry) => entry.startsWith("cookies:"));
   const proxyEntry = errors.find((entry) => entry.startsWith("proxy:"));
   const ytEntries = errors.filter((entry) => entry.startsWith("yt-dlp")).slice(-2);
@@ -763,8 +768,8 @@ export async function streamYouTubeAudio(
   );
   sendJson(response, 502, {
     error:
-      "Nao foi possivel baixar o audio do YouTube agora. Tente novamente em alguns segundos ou envie um arquivo de audio." +
-      cookiesHint,
+      "O YouTube bloqueou o download pelo servidor online. O cookie de login esta valido; o bloqueio e pelo IP de datacenter da Vercel." +
+      blockHint,
     ...(detail.length ? { detail: detail.join(" | ") } : {}),
   });
 }
