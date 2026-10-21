@@ -85,6 +85,45 @@ export function PauseIcon() {
   );
 }
 
+/** Qualquer tocador com posicao, duracao e salto (useSimplePlayer / useMixer). */
+interface SeekablePlayer {
+  position: number;
+  duration: number;
+  seek: (value: number) => void;
+}
+
+/**
+ * Barra de posicao da musica no painel da partitura: mostra o tempo atual e
+ * deixa pular direto para qualquer ponto da faixa que esta tocando. Usa o
+ * mesmo tocador do playhead, entao clicar aqui move a linha do compasso junto.
+ */
+export function MusicSeekBar({ player }: { player: SeekablePlayer }) {
+  const { position, duration, seek } = player;
+  const progress = duration > 0 ? position / duration : 0;
+  return (
+    <div className="score-seek">
+      <span className="time">
+        {formatTime(position)} / {formatTime(duration)}
+      </span>
+      <div
+        className="seek seek-lg"
+        role="slider"
+        aria-label="Posicao da musica"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(duration)}
+        aria-valuenow={Math.round(position)}
+        onClick={(event) => {
+          if (duration <= 0) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          seek(((event.clientX - rect.left) / rect.width) * duration);
+        }}
+      >
+        <div className="seek-fill" style={{ width: `${progress * 100}%` }} />
+      </div>
+    </div>
+  );
+}
+
 /** Play/Pausar da musica completa, reutilizavel em outras telas (cifra, partitura). */
 export function MusicPlayButton({
   playing,

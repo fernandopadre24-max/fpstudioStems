@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MusicPlayButton, PlayerCard } from "./components/Cards";
+import { MusicPlayButton, MusicSeekBar, PlayerCard } from "./components/Cards";
 import { CifraSheet } from "./components/CifraSheet";
 import { DropZone } from "./components/DropZone";
 import { Editor, type Selection } from "./components/Editor";
@@ -552,6 +552,10 @@ export default function App() {
   useEffect(() => {
     if (activePlayback !== "mixer") mixer.stop();
   }, [activePlayback, mixer.stop]);
+
+  // Tocador que move o playhead da partitura: a musica original ou o mixer.
+  // A barra de posicao do painel da partitura segue esta mesma fonte.
+  const scorePlayer = activePlayback === "original" ? musicPlayer : mixer;
 
   const rangeSamples = useMemo<{ start: number; end: number } | null>(
     () =>
@@ -2099,8 +2103,8 @@ export default function App() {
                 Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
                 cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
                 estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
-                Use o play acima (ou o do editor) para ouvir: uma linha marca o compasso que está
-                soando.
+                Use o play acima (ou o do editor) para ouvir: a barra mostra a posição da música e
+                deixa pular direto para um ponto, e uma linha marca o compasso que está soando.
               </p>
             </div>
 
@@ -2110,6 +2114,7 @@ export default function App() {
                 onToggle={toggleMusic}
                 disabled={!musicBuffer}
               />
+              {scorePlayer.duration > 0 && <MusicSeekBar player={scorePlayer} />}
               <label className="field">
                 <span>Voz / instrumento</span>
                 <select
@@ -2202,13 +2207,7 @@ export default function App() {
                   abc={scoreAbc}
                   color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
                   playhead={
-                    activePlayback === "original"
-                      ? musicPlayer.playing || musicPlayer.position > 0
-                        ? musicPlayer.position
-                        : null
-                      : mixer.playing || mixer.position > 0
-                        ? mixer.position
-                        : null
+                    scorePlayer.playing || scorePlayer.position > 0 ? scorePlayer.position : null
                   }
                   playheadOffset={score.offset}
                   measureSeconds={score.measureSeconds}

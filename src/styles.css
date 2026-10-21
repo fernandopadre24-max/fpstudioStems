@@ -2094,6 +2094,16 @@ body {
   margin-bottom: 8px;
 }
 
+/* Barra de posicao da musica ao lado do play (painel da partitura). */
+.score-seek {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
 .score-meta b {
   color: var(--text);
 }
