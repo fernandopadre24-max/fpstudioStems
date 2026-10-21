@@ -58,6 +58,12 @@ export interface VoiceStats {
 export interface VoicePlan {
   /** Fator de pitch (1 = sem mudanca). */
   pitchRatio: number;
+  /**
+   * Fator de duracao/andamento (1 = sem mudanca). 1,111 = 100 BPM viram 110:
+   * a fase vocoder estica por `pitchRatio * timeRatio` e reamostra so pelo
+   * pitch, entao o tempo anda e o tom (e os formantes) ficam onde estao.
+   */
+  timeRatio: number;
   /** Fator dos formantes (1 = sem mudanca). */
   formantRatio: number;
   /** Brilho: ajuste da inclinacao espectral em dB/oitava. */
@@ -316,6 +322,7 @@ export function analyzeVoiceStats(
 export function isIdentityPlan(plan: VoicePlan): boolean {
   return (
     Math.abs(plan.pitchRatio - 1) < 1e-3 &&
+    Math.abs(plan.timeRatio - 1) < 1e-3 &&
     Math.abs(plan.formantRatio - 1) < 1e-3 &&
     Math.abs(plan.tiltDelta) < 1e-3 &&
     plan.vibratoCents < 1 &&
@@ -451,22 +458,38 @@ function morphChannel(
   const binHz = sampleRate / size;
   const window = hann(size);
   const pitch = plan.pitchRatio;
-  // Dois passos, como manda o phase vocoder: primeiro estica por r (mesmo pitch,
-  // mais longo) e depois reamostra por r (sobe o pitch e devolve a duracao).
-  // Reamostrar o espectro direto nao funciona: a fase entre bins nao fecha e o
-  // overlap-add cancela quase tudo.
-  const analysisHop = pitch > 1.35 ? VOICE_HOP >> 1 : VOICE_HOP;
-  const synthesisHop = Math.max(1, Math.round(analysisHop * pitch));
+  const timeRatio = plan.timeRatio;
+  // Dois passos, como manda o phase vocoder: primeiro estica por
+  // pitch*timeRatio (mesmo pitch, outra duracao) e depois reamostra so pelo
+  // pitch (muda o tom e entrega a duracao pedida). Reamostrar o espectro direto
+  // nao funciona: a fase entre bins nao fecha e o overlap-add cancela quase
+  // tudo. Com timeRatio = 1 o passo vira o de antes: estica e reamostra pelo
+  // mesmo fator, duracao constante.
+  const stretch = pitch * timeRatio;
+  const analysisHop = stretch > 1.35 ? VOICE_HOP >> 1 : VOICE_HOP;
+  const synthesisHop = Math.max(1, Math.round(analysisHop * stretch));
   // O salto de sintese e inteiro, entao a razao real do esticamento nao e
-  // exatamente o `pitch` do plano. Usar a razao real na reamostragem evita um
-  // desvio que cresce com o tempo (0,1% ja viram 24 ms em 27 s) e deixa a voz
-  // fora de sincronia com o instrumental no fim da musica.
-  const rate = synthesisHop / analysisHop;
-  const frames = Math.max(1, Math.floor((total - size) / analysisHop) + 1);
-  // Meia janela de folga na frente: a fase da janela faz o conteudo do quadro
-  // "andar" para tras quando o tom desce, e sem essa folga o inicio do audio
-  // sairia cortado.
-  const pad = half;
+  // exatamente o `stretch` do plano. Usar a razao real evita um desvio que
+  // cresce com o tempo (0,1% ja viram 24 ms em 27 s) e deixa a voz fora de
+  // sincronia com o instrumental no fim da musica.
+  const stretchRate = synthesisHop / analysisHop;
+  // Passo da reamostragem = pitch real aplicado (esticamento / andamento).
+  const rate = stretchRate / timeRatio;
+  const outLength = Math.max(1, Math.round(total * timeRatio));
+  // Folga na frente: a fase da janela faz o conteudo do quadro "andar" para
+  // tras quando o tom desce, e sem essa folga o inicio do audio sairia cortado.
+  // Com esticamento forte (pitch alto + andamento lento) a folga precisa crescer
+  // para o comeco do audio nao cair antes da posicao zero do buffer.
+  const pad = Math.max(half, Math.ceil(half * (stretchRate - 1)));
+  // Ponto do buffer esticado que corresponde ao comeco do audio de saida.
+  const offset = pad * (2 - stretchRate);
+  const framesBase = Math.max(1, Math.floor((total - size) / analysisHop) + 1);
+  // Quadros extras no fim: sem eles o leitor da reamostragem passa do conteudo
+  // esticado e a musica perde a cauda (ate ~46 ms numa oitava acima).
+  const frames = Math.max(
+    framesBase,
+    Math.ceil((offset + outLength * rate + 2 - pad - size) / synthesisHop) + 2,
+  );
   const stretched = new Float32Array(pad + frames * synthesisHop + size);
   const norm = new Float32Array(stretched.length);
 
@@ -534,11 +557,13 @@ function morphChannel(
   let floorLevel = 0;
 
   for (let f = 0; f < frames; f++) {
-    if (isCancelled?.()) return new Float32Array(total);
+    if (isCancelled?.()) return new Float32Array(outLength);
     const start = f * analysisHop;
     let energy = 0;
     for (let i = 0; i < size; i++) {
-      const sample = input[start + i];
+      const index = start + i;
+      // Quadros extras do fim leem alem do sinal: entram como silencio.
+      const sample = index < total ? input[index] : 0;
       energy += sample * sample;
       re[i] = sample * window[i];
       im[i] = 0;
@@ -677,18 +702,18 @@ function morphChannel(
   // nao filtra, so interpola, e o que sobra volta espelhado como chiado.
   if (rate > 1.001) antiAlias(stretched, sampleRate, 0.45 * (sampleRate / rate));
 
-  // Reamostragem por r: sobe o pitch e devolve a duracao original. Hermite
-  // cubica no lugar da linear: a linear funciona como um passa-baixas e come os
-  // agudos da voz a cada salto de oitava.
+  // Reamostragem por r: sobe o pitch e entrega a duracao pedida — o buffer
+  // esticado tem ~pitch*timeRatio vezes o original e ler por ate (o pitch
+  // real) deixa timeRatio. Hermite cubica no lugar da linear: a linear funciona
+  // como um passa-baixas e come os agudos da voz a cada salto de oitaba.
   //
-  // O deslocamento de meia janela e essencial: o conteudo do quadro fica
-  // centrado em f*hop + size/2, entao ler i*pitch puro adianta/atrasa o audio em
-  // (size/2)*(1/pitch - 1) amostras (23 ms numa oitava abaixo) e a voz sai
-  // flutuando em relacao ao instrumental.
-  const out = new Float32Array(total);
+  // O deslocamento (offset, calculado la em cima) e essencial: o conteudo do
+  // quadro fica centrado em f*hop + size/2, entao ler i*rate puro adianta ou
+  // atrasa o audio em (size/2)*(1/rate - 1) amostras (23 ms numa oitaba abaixo)
+  // e a voz sai flutuando em relacao ao instrumental.
+  const out = new Float32Array(outLength);
   const last = stretched.length - 1;
-  const offset = pad * (2 - rate);
-  for (let i = 0; i < total; i++) {
+  for (let i = 0; i < outLength; i++) {
     const position = offset + i * rate;
     const base = Math.floor(position);
     if (base + 2 >= stretched.length) break;
@@ -704,11 +729,11 @@ function morphChannel(
   }
 
   // Rampa curta nas pontas so para nao estalar no comeco/fim.
-  const fade = Math.min(Math.round(0.003 * sampleRate), total >> 1);
+  const fade = Math.min(Math.round(0.003 * sampleRate), outLength >> 1);
   for (let i = 0; i < fade; i++) {
     const ramp = i / fade;
     out[i] *= ramp;
-    out[total - 1 - i] *= ramp;
+    out[outLength - 1 - i] *= ramp;
   }
   return out;
 }
@@ -763,13 +788,21 @@ function softLimit(values: Float32Array, ceiling: number): void {
 
 /** Deixa a voz transformada no mesmo nivel medio da original e ceifa picos. */
 function matchLevel(reference: Float32Array, left: Float32Array, right: Float32Array): void {
+  // Energia POR AMOSTRA (densidade): com andamento novo os comprimentos mudam e
+  // comparar totais cruaria um ganho errado — um audio 2x mais longo “dobra” a
+  // energia sem ficar mais alto. Com comprimentos iguais a conta e a de antes.
+  const refCount = reference.length;
+  const outCount = Math.min(left.length, right.length);
+  if (refCount <= 0 || outCount <= 0) return;
   let refEnergy = 0;
+  for (let i = 0; i < refCount; i++) refEnergy += reference[i] * reference[i];
   let outEnergy = 0;
-  for (let i = 0; i < reference.length; i++) {
-    refEnergy += reference[i] * reference[i];
+  for (let i = 0; i < outCount; i++) {
     const mid = (left[i] + right[i]) * 0.5;
     outEnergy += mid * mid;
   }
+  refEnergy /= refCount;
+  outEnergy /= outCount;
   if (refEnergy <= 0 || outEnergy <= 0) return;
   const scale = clamp(Math.sqrt(refEnergy / outEnergy), 0.25, 4);
   for (let i = 0; i < left.length; i++) {
@@ -825,8 +858,10 @@ export function findVoiceWindow(
 
 /**
  * Troca o timbre da voz aplicando o plano. So o canal medio e transformado: a
- * voz principal fica no centro, e o lado (reverb/estereo) intacto mantem a
- * imagem estereo no lugar.
+ * voz principal fica no centro, e o lado (reverb/estereo) mantem a imagem
+ * estereo no lugar. Quando o plano muda o andamento (timeRatio), o lado e as
+ * sibilantes sao esticados por um plano "seco" — mesmo tempo, mesmo tom — para
+ * as bandas continuarem juntas em sincronia.
  */
 export function morphVoice(
   left: Float32Array,
@@ -838,6 +873,12 @@ export function morphVoice(
   isCancelled?: () => boolean,
 ): { left: Float32Array; right: Float32Array } {
   const total = Math.min(left.length, right.length);
+  const stretching = Math.abs(plan.timeRatio - 1) > 1e-3;
+  // Com andamento novo a saida tem outra duracao; todos os passes (medio,
+  // lado, sibilantes) usam o mesmo timeRatio, entao as bandas saem com o mesmo
+  // comprimento e encaixam direto na recombinação.
+  const outLength = stretching ? Math.max(1, Math.round(total * plan.timeRatio)) : total;
+
   const mid = new Float32Array(total);
   const side = new Float32Array(total);
   for (let i = 0; i < total; i++) {
@@ -845,66 +886,129 @@ export function morphVoice(
     side[i] = (left[i] - right[i]) * 0.5;
   }
 
-  // Separa o que vem do trato vocal (muda com o tom) do que vem da boca/dentes
-  // (sibilantes, que nao mudam de frequencia quando a voz troca de registro).
-  // O filtro roda nos dois sentidos (fase zero): sem isso o atraso de grupo
-  // atrapalha a conta do complemento e sobra um resto audivel da voz antiga na
-  // frequencia original. Em troca a resposta fica ao quadrado, entao o corte e
-  // um pouco mais baixo. O complemento e a diferenca, entao a soma das bandas
-  // devolve o sinal original exatamente.
-  const k = Math.tan((Math.PI * SIBILANCE_HZ) / (sampleRate * 1.1));
-  const sections = [0.5411961, 1.306563].map((q) => {
-    const a0 = 1 + k / q + k * k;
-    return {
-      b0: (k * k) / a0,
-      b1: (2 * k * k) / a0,
-      b2: (k * k) / a0,
-      a1: (2 * (k * k - 1)) / a0,
-      a2: (1 - k / q + k * k) / a0,
-    };
-  });
-  const low = mid.slice();
-  const high = new Float32Array(total);
-  for (const { b0, b1, b2, a1, a2 } of sections) {
-    let x1 = 0;
-    let x2 = 0;
-    let y1 = 0;
-    let y2 = 0;
-    for (let i = 0; i < total; i++) {
-      const x = low[i];
-      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      x2 = x1;
-      x1 = x;
-      y2 = y1;
-      y1 = y;
-      low[i] = y;
+  // Plano "seco" que so anda no tempo: sem pitch, sem timbre. E o que leva o
+  // lado estereo (e, junto com o pitch, as sibilantes) no andamento novo sem
+  // desafinar nem colore.
+  const dryStretch: VoicePlan = {
+    pitchRatio: 1,
+    timeRatio: plan.timeRatio,
+    formantRatio: 1,
+    tiltDelta: 0,
+    vibratoCents: 0,
+    vibratoHz: 0,
+    rasp: 0,
+    breath: 0,
+    nasalDb: 0,
+    ringDb: 0,
+    power: 0,
+  };
+
+  // So separa as sibilantes quando o tom muda: sem mudanca de pitch nao ha
+  // risco de "s" saltando de registro, e o corte vira um ponto de costura
+  // desnecessario num sinal que vai ser esticado do mesmo jeito.
+  const splitSibilance = Math.abs(plan.pitchRatio - 1) > 1e-3;
+
+  // Cada passo reporta uma fatia do progresso (medio primeiro, depois o que e
+  // so esticar), para a barra andar de ponta a ponta sem pular. Sem andamento
+  // novo o lado e so copiado, entao o meio leva a faixa inteira.
+  const mainTop = stretching ? (splitSibilance ? 0.6 : 0.7) : 1;
+  const segment = (from: number, to: number) =>
+    onProgress
+      ? (done: number, whole: number) =>
+          onProgress(from + (to - from) * (whole > 0 ? done / whole : 1), 1)
+      : undefined;
+
+  let morphed: Float32Array;
+  let sideOut: Float32Array = side;
+
+  if (splitSibilance) {
+    // Separa o que vem do trato vocal (muda com o tom) do que vem da boca/dentes
+    // (sibilantes, que nao mudam de frequencia quando a voz troca de registro).
+    // O filtro roda nos dois sentidos (fase zero): sem isso o atraso de grupo
+    // atrapalha a conta do complemento e sobra um resto audivel da voz antiga na
+    // frequencia original. Em troca a resposta fica ao quadrado, entao o corte e
+    // um pouco mais baixo. O complemento e a diferenca, entao a soma das bandas
+    // devolve o sinal original exatamente.
+    const k = Math.tan((Math.PI * SIBILANCE_HZ) / (sampleRate * 1.1));
+    const sections = [0.5411961, 1.306563].map((q) => {
+      const a0 = 1 + k / q + k * k;
+      return {
+        b0: (k * k) / a0,
+        b1: (2 * k * k) / a0,
+        b2: (k * k) / a0,
+        a1: (2 * (k * k - 1)) / a0,
+        a2: (1 - k / q + k * k) / a0,
+      };
+    });
+    const low = mid.slice();
+    const high = new Float32Array(total);
+    for (const { b0, b1, b2, a1, a2 } of sections) {
+      let x1 = 0;
+      let x2 = 0;
+      let y1 = 0;
+      let y2 = 0;
+      for (let i = 0; i < total; i++) {
+        const x = low[i];
+        const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x;
+        y2 = y1;
+        y1 = y;
+        low[i] = y;
+      }
+      x1 = 0;
+      x2 = 0;
+      y1 = 0;
+      y2 = 0;
+      for (let i = total - 1; i >= 0; i--) {
+        const x = low[i];
+        const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x;
+        y2 = y1;
+        y1 = y;
+        low[i] = y;
+      }
     }
-    x1 = 0;
-    x2 = 0;
-    y1 = 0;
-    y2 = 0;
-    for (let i = total - 1; i >= 0; i--) {
-      const x = low[i];
-      const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      x2 = x1;
-      x1 = x;
-      y2 = y1;
-      y1 = y;
-      low[i] = y;
+    for (let i = 0; i < total; i++) high[i] = mid[i] - low[i];
+
+    if (isIdentityPlan(plan)) {
+      morphed = low;
+      for (let i = 0; i < total; i++) morphed[i] += high[i];
+      sideOut = side;
+    } else {
+      const main = morphChannel(low, plan, stats, sampleRate, segment(0, mainTop), isCancelled);
+      if (stretching) {
+        // Sibilantes acompanham o tempo mas ficam na frequencia original.
+        const highOut = morphChannel(high, dryStretch, stats, sampleRate, segment(0.6, 0.9), isCancelled);
+        morphed = new Float32Array(outLength);
+        for (let i = 0; i < outLength; i++) morphed[i] = main[i] + highOut[i];
+      } else {
+        morphed = main;
+        for (let i = 0; i < total; i++) morphed[i] += high[i];
+        sideOut = side;
+      }
     }
+  } else if (isIdentityPlan(plan)) {
+    morphed = mid;
+    sideOut = side;
+  } else {
+    // Sem mudanca de pitch o corte de sibilantes nao protege nada: estica o
+    // meio inteiro (plano seco ou com timbre) de uma vez.
+    morphed = morphChannel(mid, plan, stats, sampleRate, segment(0, mainTop), isCancelled);
   }
-  for (let i = 0; i < total; i++) high[i] = mid[i] - low[i];
 
-  const morphed = isIdentityPlan(plan)
-    ? low
-    : morphChannel(low, plan, stats, sampleRate, onProgress, isCancelled);
-  for (let i = 0; i < total; i++) morphed[i] += high[i];
+  if (stretching) {
+    // O lado (reverb, estéreo) tem que acompanhar o tempo; com pitch diferente
+    // de 1 o plano seco mantem a imagem estéreo onde estava.
+    sideOut = morphChannel(side, dryStretch, stats, sampleRate, segment(mainTop, 1), isCancelled);
+  }
 
-  const outLeft = new Float32Array(total);
-  const outRight = new Float32Array(total);
-  for (let i = 0; i < total; i++) {
-    outLeft[i] = morphed[i] + side[i];
-    outRight[i] = morphed[i] - side[i];
+  const outLeft = new Float32Array(outLength);
+  const outRight = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    outLeft[i] = morphed[i] + sideOut[i];
+    outRight[i] = morphed[i] - sideOut[i];
   }
 
   applyRasp(outLeft, plan.rasp, sampleRate);
@@ -918,16 +1022,20 @@ export function morphVoice(
 // --- Troca de tom da musica inteira ---
 
 /**
- * Plano para mudar o tom sem cor de timbre: so o pitch anda (em semitons) e o
- * envelope do espectro fica preso na frequencia original. E o que faz a voz
- * continuar sendo a mesma pessoa e os instrumentos continuarem com a mesma
- * cor — como se tocassem outra nota no mesmo instrumento. A duracao nao muda
- * (phase vocoder: estica e reamostra), entao as trilhas seguem em sincronia e
- * a selecao A/B do editor continua valendo.
+ * Plano para mudar tom e/ou andamento sem cor de timbre: o pitch anda em
+ * semitons, a duracao anda pelo fator de andamento, e o envelope do espectro
+ * fica preso na frequencia original — e o que faz a voz continuar sendo a
+ * mesma pessoa e os instrumentos continuarem com a mesma cor, como se
+ * tocassem outra nota no mesmo instrumento. Com timeRatio = 1 a duracao nao
+ * muda (phase vocoder: estica e reamostra), entao as trilhas seguem em
+ * sincronia e a selecao A/B do editor continua valendo.
  */
-export function transposePlan(semitones: number): VoicePlan {
+export function transposePlan(semitones: number, timeRatio = 1): VoicePlan {
   return {
     pitchRatio: Math.pow(2, clamp(semitones, -12, 12) / 12),
+    // 0,5 = metade da duracao (dobro do andamento); 2 = duracao em dobro. O
+    // clamp cobre os extremos uteis sem deixar o phase vocoder artefatar.
+    timeRatio: clamp(timeRatio, 0.5, 2),
     formantRatio: 1,
     tiltDelta: 0,
     vibratoCents: 0,

@@ -3,8 +3,7 @@ import {
   useRef,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { StemId, StemMeta } from "../lib/constants";
-import type { TrackState } from "../hooks/useMixer";
+import type { MixerTrackId, TrackState } from "../hooks/useMixer";
 import { formatTime } from "../lib/audio";
 import { DownloadIcon, PauseIcon, PlayIcon } from "./Cards";
 import { Waveform } from "./Waveform";
@@ -14,8 +13,16 @@ export interface Selection {
   end: number;
 }
 
+// O metronomo reusa o visual de StemMeta (ponto colorido + rotulo), mas o id
+// dele nao e um StemId: nao vem da separacao e nao pode entrar no zip.
+export interface EditorTrackMeta {
+  id: MixerTrackId;
+  label: string;
+  color: string;
+}
+
 export interface EditorTrack {
-  meta: StemMeta;
+  meta: EditorTrackMeta;
   peaks: Float32Array;
 }
 
@@ -28,10 +35,12 @@ interface EditorProps {
   selection: Selection | null;
   onToggle: () => void;
   onSeek: (seconds: number) => void;
-  onState: (id: StemId, patch: Partial<TrackState>) => void;
+  onState: (id: MixerTrackId, patch: Partial<TrackState>) => void;
   onSelection: (selection: Selection | null) => void;
-  onDownload: (id: StemId) => void;
+  onDownload: (id: MixerTrackId) => void;
   downloadLabel?: string;
+  /** Metronomo: estado do canal e alternador (mudo) no transporte. */
+  metronome?: { muted: boolean; onToggle: () => void; bpm: number | null };
 }
 
 const MIN_SELECTION = 0.4;
@@ -59,6 +68,7 @@ export function Editor({
   onSelection,
   onDownload,
   downloadLabel = "WAV",
+  metronome,
 }: EditorProps) {
   const stripRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<"start" | "end" | null>(null);
@@ -137,6 +147,19 @@ export function Editor({
           {playing ? <PauseIcon /> : <PlayIcon />}
           {playing ? "Pausar" : "Tocar stems"}
         </button>
+        {metronome && (
+          <button
+            type="button"
+            className={`btn btn-ghost${metronome.muted ? "" : " btn-on"} metronome-btn`}
+            onClick={metronome.onToggle}
+            aria-pressed={!metronome.muted}
+            title="Metrônomo: clique no andamento atual"
+          >
+            <span className="metronome-dot" />
+            Metrônomo
+            {metronome.bpm ? <b>{Math.round(metronome.bpm)}</b> : null}
+          </button>
+        )}
         <span className="time">{formatTime(position)}</span>
         <div className="seek seek-lg" onPointerDown={(e) => onSeek(timeFromEvent(e, e.currentTarget))}>
           <div className="seek-fill" style={{ width: `${progress * 100}%` }} />
@@ -178,21 +201,30 @@ export function Editor({
         </div>
 
         {tracks.map((track) => {
-          const state = states[track.meta.id] ?? { volume: 1, muted: false, solo: false };
+          // Fallback espelha o `initial` do mixer: o metronome entra mudo, as
+          // trilhas da separacao entram com volume cheio.
+          const state = states[track.meta.id] ?? {
+            volume: 1,
+            muted: track.meta.id === "metronome",
+            solo: false,
+          };
           return (
             <Fragment key={track.meta.id}>
               <div className="lane-head">
                 <div className="lane-top">
                   <span className="card-dot" style={{ background: track.meta.color }} />
                   <strong>{track.meta.label}</strong>
-                  <button
-                    type="button"
-                    className="lane-download"
-                    onClick={() => onDownload(track.meta.id)}
-                    title={`Baixar ${downloadLabel}`}
-                  >
-                    <DownloadIcon />
-                  </button>
+                  {/* O metronomo e um click sintetizado: nao baixa arquivo. */}
+                  {track.meta.id !== "metronome" && (
+                    <button
+                      type="button"
+                      className="lane-download"
+                      onClick={() => onDownload(track.meta.id)}
+                      title={`Baixar ${downloadLabel}`}
+                    >
+                      <DownloadIcon />
+                    </button>
+                  )}
                 </div>
                 <div className="lane-mix">
                   <button

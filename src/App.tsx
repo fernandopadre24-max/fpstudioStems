@@ -6,6 +6,7 @@ import { Editor, type Selection } from "./components/Editor";
 import { SupportCard } from "./components/SupportCard";
 import { YouTubeSearch } from "./components/YouTubeSearch";
 import { useMixer, type MixerTrack } from "./hooks/useMixer";
+import { buildMetronome, metronomePeaks, type MetronomeSpec } from "./lib/metronome";
 import { useSimplePlayer } from "./hooks/useSimplePlayer";
 import { useVoiceDemo } from "./hooks/useVoiceDemo";
 import {
@@ -69,6 +70,7 @@ import { SeparationEngine } from "./lib/separationClient";
 import {
   isPercussionStem,
   pairToBuffer,
+  tempoFileSuffix,
   tomFileSuffix,
   tomLabel,
   transposeStereo,
@@ -102,6 +104,10 @@ const GPU_BROKEN_KEY = "stemroller.gpuBroken";
 const VOCAL_STEM_IDS: StemId[] = ["vocals", "leadVocal", "backingVocal"];
 const isVocalStem = (id: StemId): boolean => VOCAL_STEM_IDS.includes(id);
 
+// Visual da faixa de metronomo no editor (rotulo + cor). O id "metronome" nao
+// e StemId: e um click sintetizado, nao vem da separacao e nao entra no zip.
+const METRONOME_META = { id: "metronome", label: "Metrônomo", color: "#fbbf24" } as const;
+
 // --- Tom da musica ---
 //
 // O tom escolhido vale para tudo o que sai de audio (trilhas, voz
@@ -118,6 +124,11 @@ interface VoiceResult {
 
 interface TomAudio {
   semitones: number;
+  /**
+   * Fator de andamento pedido (1 = original). As trilhas processadas tem
+   * duracao x timeRatio; a mistura e o mixer usam a duracao nova.
+   */
+  timeRatio: number;
   /** Trilhas processadas a partir destes resultados (null = nao processadas). */
   stemsSource: ResultStem[] | null;
   stems: Map<StemId, AudioPair>;
@@ -134,21 +145,42 @@ interface TomAudio {
 
 /** Trilhas processadas em paralelo: cada worker roda o phase vocoder. */
 const TOM_SLOTS = 3;
+/**
+ * Entradas no cache de (tom, andamento). Cada entrada carrega todas as trilhas
+ * processadas + misturas (centenas de MB num album de 4 min), entao o limite e
+ * apertado de proposito: cobre o A/B entre dois andamentos sem disputar
+ * memoria com o modelo da separacao no Android.
+ */
+const TOM_CACHE_SLOTS = 2;
 
-/** Soma as trilhas: melodia no tom novo, percussao e vocais conforme pedido. */
+/**
+ * Soma as trilhas: melodia no tom/andamento novo, percussao so acompanha o
+ * tempo (nao tem tom). Com timeRatio != 1 todas as trilhas foram esticadas,
+ * entao a mistura sai na duracao nova.
+ */
 function buildTomMix(
   stems: ResultStem[],
   tom: Map<StemId, AudioPair>,
   instrumentalOnly: boolean,
+  timeRatio = 1,
 ): AudioBuffer | null {
-  const length = stems[0]?.left.length ?? 0;
+  // A mistura tem que usar a duracao NOVA quando houve esticamento; a primeira
+  // trilha processada ja esta nessa duracao.
+  const first = stems.find((stem) => tom.has(stem.id));
+  const length =
+    first && tom.get(first.id)
+      ? tom.get(first.id)!.left.length
+      : Math.max(1, Math.round((stems[0]?.left.length ?? 0) * timeRatio));
   if (length <= 0) return null;
   const left = new Float32Array(length);
   const right = new Float32Array(length);
   for (const stem of stems) {
     if (instrumentalOnly && isVocalStem(stem.id)) continue;
     const audio = tom.get(stem.id) ?? stem;
-    for (let i = 0; i < length; i++) {
+    // Trilha sem transformacao (percussao com timeRatio=1) pode ter outra
+    // duracao: copia so o que cabe.
+    const count = Math.min(length, audio.left.length);
+    for (let i = 0; i < count; i++) {
       left[i] += audio.left[i];
       right[i] += audio.right[i];
     }
@@ -211,6 +243,14 @@ export default function App() {
   // Tom da musica (semitons): muda voz e instrumentos de harmonia; bateria e
   // percussao ficam onde estao. Vale para tocador, downloads e cifra.
   const [semitones, setSemitones] = useState(0);
+  // Andamento alvo (BPM). null = andamento original. O timeRatio e a duracao
+  // nova / duracao antiga, ou seja, base/alvo: 100 -> 110 vira 0,909 (mais
+  // curto, mais rapido). O phase vocoder estica e reamostra, entao o tom nao
+  // anda — a musica fica no mesmo tom e so o pulso muda.
+  const [targetBpm, setTargetBpm] = useState<number | null>(null);
+  // Rascunho digitado no campo de andamento: commit so no blur/Enter — digitar
+  // "110" nao dispara tres reprocessamentos ("1", "11", "110").
+  const [bpmDraft, setBpmDraft] = useState<string | null>(null);
   const [tomAudio, setTomAudio] = useState<TomAudio | null>(null);
   const [tomProgress, setTomProgress] = useState<number | null>(null);
   const [tomError, setTomError] = useState<string | null>(null);
@@ -286,6 +326,21 @@ export default function App() {
   const tomAudioRef = useRef<TomAudio | null>(null);
   tomAudioRef.current = tomAudio;
 
+  // --- Cache por andamento ---
+  //
+  // O batch de tom/andamento e caro (phase vocoder em todas as trilhas), entao
+  // as ultimas combinacoes (tom, andamento) ja processadas ficam guardadas:
+  // voltar de 110 para 100 BPM (ou A/B entre dois andamentos) troca de entrada
+  // na hora, sem refazer o audio. LRU: entra no fim, o mais antigo sai.
+  //
+  // O limite e 2 entradas de proposito: cada TomAudio carrega todas as trilhas
+  // processadas + as duas misturas (centenas de MB num album de 4 min), e no
+  // Android isso disputa memoria com o modelo da separacao — por isso
+  // startSeparation/handleFile tambem limpam o cache.
+  const tomCacheRef = useRef(new Map<string, TomAudio>());
+  const tomCacheKey = (semitones: number, timeRatio: number): string =>
+    `${semitones}:${timeRatio}`;
+
   const identity = useMemo(
     () => (file ? identifyTrack(file.name, trackMeta) : { title: "", artist: "" }),
     [file, trackMeta],
@@ -344,11 +399,28 @@ export default function App() {
     setActivePlayback(null);
   }, []);
 
+  // --- Andamento (tempo) ---
+  //
+  // O andamento pedido vira um fator de duracao: base/alvo. 100 -> 110 = 0,909
+  // (audio 9% mais curto, 10% mais rapido; o tom fica onde estava). O batch de
+  // transformacao usa o mesmo caminho do tom — estica e reamostra — e as
+  // trilhas novas entram no mixer com essa duracao.
+  const baseBpm = analysis?.bpm ?? score?.bpm ?? 0;
+  const timeRatio = useMemo(() => {
+    if (!targetBpm || !baseBpm) return 1;
+    const ratio = baseBpm / targetBpm;
+    // Clamp defensivo: phase vocoder estica bem ate ~2x; alem disso a janela
+    // come a definicao do ataque.
+    return Math.min(2, Math.max(0.5, ratio));
+  }, [baseBpm, targetBpm]);
+  // Andamento efetivo que o ouvinte vai sentir (para rótulos e nome de arquivo).
+  const effectiveBpm = baseBpm && timeRatio !== 1 ? baseBpm / timeRatio : baseBpm;
+
   // --- Troca de tom ---
   //
-  // O batch roda quando o tom pedido muda, quando chega outra separacao e
-  // quando a voz transformada muda — sempre reaproveitando o que ja esta
-  // pronto para as mesmas fontes (trocar a voz nao refaz as trilhas). Sem
+  // O batch roda quando o tom/andamento pedido muda, quando chega outra
+  // separacao e quando a voz transformada muda — sempre reaproveitando o que ja
+  // esta pronto para as mesmas fontes (trocar a voz nao refaz as trilhas). Sem
   // stems, o proprio arquivo e que muda de tom.
 
   const applyTom = useCallback(async () => {
@@ -357,7 +429,7 @@ export default function App() {
     tomJobsRef.current = [];
     setTomError(null);
 
-    if (semitones === 0) {
+    if (semitones === 0 && timeRatio === 1) {
       setTomAudio((current) => (current ? null : current));
       setTomProgress(null);
       return;
@@ -370,8 +442,18 @@ export default function App() {
       return;
     }
 
-    const prev = tomAudioRef.current;
-    const same = prev && prev.semitones === semitones ? prev : null;
+    // Cache por andamento: a entrada exata (tom, andamento) ja pronta refaz so
+    // o que mudou de fonte (voz/separacao novas) e reentrega na hora — voltar
+    // de 110 para 100 BPM nao refaz o phase vocoder.
+    const key = tomCacheKey(semitones, timeRatio);
+    const cached = tomCacheRef.current.get(key) ?? null;
+    if (cached) {
+      // Reinsere no fim: a entrada ativa e sempre a mais recente, entao ela
+      // nunca sai do cache por eviction enquanto estiver em uso.
+      tomCacheRef.current.delete(key);
+      tomCacheRef.current.set(key, cached);
+    }
+    const same = cached;
     const needStems = Boolean(results) && (!same || same.stemsSource !== results);
     const needDecode = !results && Boolean(decoded) && (!same || same.decodeSource !== decoded);
     const needVoice = Boolean(results && voiceResult) && (!same || same.voiceSource !== voiceResult);
@@ -384,15 +466,23 @@ export default function App() {
       key: string;
       left: Float32Array;
       right: Float32Array;
+      /** Tom por item: percussao nao tem, mas acompanha o andamento. */
+      semitones: number;
       use: (output: AudioPair) => void;
     }[] = [];
     if (needStems && results) {
       for (const stem of results) {
-        if (isPercussionStem(stem.id)) continue;
+        const percussion = isPercussionStem(stem.id);
+        // Percussao so entra no batch quando o andamento mudou: sem mudanca
+        // de tempo ela fica onde estao (copia direta la na mistura); com
+        // andamento novo ela e esticada com semitons fixados em 0 — bateria
+        // acompanha o pulso, mas nao muda de tom.
+        if (percussion && timeRatio === 1) continue;
         items.push({
           key: `stem:${stem.id}`,
           left: stem.left,
           right: stem.right,
+          semitones: percussion ? 0 : semitones,
           use: (output) => void stems.set(stem.id, output),
         });
       }
@@ -402,6 +492,7 @@ export default function App() {
         key: "voice",
         left: voiceResult.left,
         right: voiceResult.right,
+        semitones,
         use: (output) => {
           voice = output;
         },
@@ -412,6 +503,7 @@ export default function App() {
         key: "decode",
         left: decoded.left,
         right: decoded.right,
+        semitones,
         use: (output) => {
           decodedPair = output;
         },
@@ -422,6 +514,9 @@ export default function App() {
     // mistura (trilhas so de percussao nao levam tom); se ja esta tudo pronto,
     // mexer no estado so recriaria os buffers e derrubaria a reproducao.
     if (items.length === 0 && !needStems) {
+      // Cache hit: nao refaz audio, mas tem que ATIVAR a entrada guardada — o
+      // tomAudio atual pode ainda ser de outro andamento (volta de 110 p/ 100).
+      if (same && tomAudioRef.current !== same) setTomAudio(same);
       setTomProgress(null);
       return;
     }
@@ -446,12 +541,13 @@ export default function App() {
           const job = transposeStereo(
             item.left,
             item.right,
-            semitones,
+            item.semitones,
             SAMPLE_RATE,
             (fraction) => {
               fractions.set(item.key, fraction);
               report();
             },
+            timeRatio,
           );
           tomJobsRef.current.push(job);
           const output = await job.promise;
@@ -475,20 +571,22 @@ export default function App() {
       if (tomRunRef.current !== runId) return;
     }
 
-    // Mistura pronta para tocar e baixar: o que mudou de tom acompanha, a
-    // percussao nao (e os vocais entram na do "Original", como sempre).
+    // Mistura pronta para tocar e baixar: o que mudou de tom/andamento
+    // acompanha, a percussao so acompanha o andamento (e os vocais entram na do
+    // "Original", como sempre).
     let original: AudioBuffer | null;
     let instrumental: AudioBuffer | null;
     if (needStems && results) {
-      original = buildTomMix(results, stems, false);
-      instrumental = buildTomMix(results, stems, true);
+      original = buildTomMix(results, stems, false, timeRatio);
+      instrumental = buildTomMix(results, stems, true, timeRatio);
     } else {
       original = needDecode && decodedPair ? pairToBuffer(decodedPair) : (same?.original ?? null);
       instrumental = same?.instrumental ?? null;
     }
 
-    setTomAudio({
+    const entry: TomAudio = {
       semitones,
+      timeRatio,
       stemsSource: needStems ? results : (same?.stemsSource ?? null),
       stems,
       mixSource: needStems && results ? results : (same?.mixSource ?? null),
@@ -497,9 +595,19 @@ export default function App() {
       decodeSource: needDecode && decodedPair ? decoded : (same?.decodeSource ?? null),
       voiceSource: needVoice ? voiceResult : (same?.voiceSource ?? null),
       voice,
-    });
+    };
+    // Upsert no cache (LRU): entra no fim; se passar do limite, sai o mais
+    // antigo — nunca a entrada recem-guardada, que fica na cauda.
+    tomCacheRef.current.delete(key);
+    tomCacheRef.current.set(key, entry);
+    while (tomCacheRef.current.size > TOM_CACHE_SLOTS) {
+      const oldest = tomCacheRef.current.keys().next().value;
+      if (oldest === undefined || oldest === key) break;
+      tomCacheRef.current.delete(oldest);
+    }
+    setTomAudio(entry);
     setTomProgress(null);
-  }, [decoded, phase, results, semitones, voiceResult]);
+  }, [decoded, phase, results, semitones, timeRatio, voiceResult]);
 
   useEffect(() => {
     void applyTom();
@@ -515,9 +623,14 @@ export default function App() {
     [],
   );
 
-  // Audio no tom novo so entra quando o batch terminou para as fontes atuais;
-  // antes disso tudo continua tocando e saindo no tom original.
-  const tomFresh = tomAudio && tomAudio.semitones === semitones ? tomAudio : null;
+  // Audio no tom/andamento novo so entra quando o batch terminou para as
+  // fontes atuais; antes disso tudo continua tocando e saindo no original.
+  const tomFresh =
+    tomAudio &&
+    tomAudio.semitones === semitones &&
+    Math.abs(tomAudio.timeRatio - timeRatio) < 1e-4
+      ? tomAudio
+      : null;
   const activeStems = tomFresh && results && tomFresh.stemsSource === results ? tomFresh : null;
   const activeMix = tomFresh && results && tomFresh.mixSource === results ? tomFresh : null;
   const activeDecode =
@@ -536,18 +649,53 @@ export default function App() {
   );
   const toggleMusic = () => musicPlayer.toggle();
 
+  // Grade do metronome: o mixer vive no tempo novo quando as trilhas vieram
+  // esticadas, entao deriva o andamento e o offset do tamanho REAL da primeira
+  // trilha do mixer (em vez de assumir o pedido). Isso mantem o clique em
+  // sincronia tambem no intervalo em que o andamento ainda nao foi processado.
+  const metronomeSpec = useMemo<MetronomeSpec | null>(() => {
+    if (!results || results.length === 0) return null;
+    const originalSec = results[0].left.length / SAMPLE_RATE;
+    const active = activeStems?.stems.get(results[0].id);
+    const mixerSec = (active ? active.left.length : results[0].left.length) / SAMPLE_RATE;
+    const ratio = originalSec > 0 ? mixerSec / originalSec : 1;
+    return {
+      bpm: baseBpm && ratio > 0 ? baseBpm / ratio : 120,
+      beatsPerBar: score?.beatsPerBar ?? 4,
+      // O offset do score e em segundos do tempo original: escala junto.
+      offsetSec: (score?.offset ?? 0) * ratio,
+      durationSec: mixerSec,
+    };
+  }, [results, activeStems, baseBpm, score]);
+
   const mixerTracks = useMemo<MixerTrack[] | null>(() => {
-    if (!results) return null;
-    const tracks = results.map((stem) => {
+    if (!results || !metronomeSpec) return null;
+    const tracks: MixerTrack[] = results.map((stem) => {
       const audio = activeStems?.stems.get(stem.id) ?? stem;
       return { id: stem.id, left: audio.left, right: audio.right };
     });
     const voice = activeVoice ?? voiceResult;
     if (voice) tracks.push({ id: "clonedVocal", left: voice.left, right: voice.right });
+    // Metronomo: canal extra, sempre mudo na entrada (o botao no editor
+    // desliga o mudo). Nao e StemId — nao entra no zip nem nos downloads.
+    const click = buildMetronome(metronomeSpec);
+    tracks.push({
+      id: "metronome",
+      left: click.left,
+      right: click.right,
+      initial: { muted: true },
+    });
     return tracks;
-  }, [results, voiceResult, activeStems, activeVoice]);
+  }, [results, voiceResult, activeStems, activeVoice, metronomeSpec]);
 
   const mixer = useMixer(mixerTracks);
+
+  // Metronomo: o estado mora no mixer (mesma fonte do M da faixa), entao o
+  // botao do transporte e o M da linha nunca brigam. Comeca mudo (initial).
+  const metronomeMuted = mixer.states["metronome"]?.muted ?? true;
+  const toggleMetronome = useCallback(() => {
+    mixer.setTrackState("metronome", { muted: !metronomeMuted });
+  }, [metronomeMuted, mixer.setTrackState]);
 
   useEffect(() => {
     if (activePlayback !== "mixer") mixer.stop();
@@ -556,6 +704,17 @@ export default function App() {
   // Tocador que move o playhead da partitura: a musica original ou o mixer.
   // A barra de posicao do painel da partitura segue esta mesma fonte.
   const scorePlayer = activePlayback === "original" ? musicPlayer : mixer;
+
+  // A partitura foi lida da linha do tempo ORIGINAL; quando o que toca esta
+  // esticado (andamento novo), a posicao do tocador vem em segundos do tempo
+  // novo. Divide pelo fator para o playhead cair na medida certa.
+  const playedTimeRatio =
+    timeRatio !== 1 &&
+    (activePlayback === "original"
+      ? Boolean(activeMix?.original ?? activeDecode?.original)
+      : Boolean(activeStems))
+      ? timeRatio
+      : 1;
 
   const rangeSamples = useMemo<{ start: number; end: number } | null>(
     () =>
@@ -571,6 +730,24 @@ export default function App() {
   useEffect(() => {
     mixer.setRange(selection);
   }, [selection, mixer.setRange]);
+
+  // A selecao A/B e em segundos da linha do tempo do mixer. Quando o
+  // andamento muda, a duracao muda junto, entao reescalona a selecao para o
+  // mesmo trecho musical (1:30 de 100 BPM vira ~1:22 de 110 BPM).
+  const lastRatioRef = useRef(timeRatio);
+  useEffect(() => {
+    const previous = lastRatioRef.current;
+    lastRatioRef.current = timeRatio;
+    if (Math.abs(previous - timeRatio) < 1e-4) return;
+    setSelection((current) =>
+      current
+        ? {
+            start: Math.max(0, current.start * (timeRatio / previous)),
+            end: current.end * (timeRatio / previous),
+          }
+        : current,
+    );
+  }, [timeRatio]);
 
   useEffect(() => {
     const engine = new SeparationEngine();
@@ -691,6 +868,8 @@ export default function App() {
       setError(null);
       setResults(null);
       setTomAudio(null);
+      // Musica nova: as entradas guardadas sao do arquivo anterior.
+      tomCacheRef.current.clear();
       setInstrumental(null);
       setInstrumentalPeaks(null);
       setOriginalBuffer(null);
@@ -736,6 +915,9 @@ export default function App() {
     setError(null);
     setResults(null);
     setTomAudio(null);
+    // Cache invalido (as trilhas vao mudar) e ele disputaria memoria com o
+    // modelo no carregamento — limpa antes de separar.
+    tomCacheRef.current.clear();
     setInstrumental(null);
     setInstrumentalPeaks(null);
     setSeparationProgress(null);
@@ -753,6 +935,49 @@ export default function App() {
   const baseName = file ? sanitizeBaseName(file.name) : "musica";
   const corte = rangeSamples ? " (corte)" : "";
   const ext = audioExtension(exportFormat);
+  // Sufixo de andamento (" (110 BPM)") para os nomes de arquivo: so aparece
+  // quando o tempo mudou de verdade e essa fonte foi reprocessada. Percussao
+  // nao muda de tom, mas acompanha o tempo — entao leva so a marca de BPM.
+  const bpmSuffix = tempoFileSuffix(effectiveBpm, timeRatio);
+  const fileMarks = useCallback(
+    (processed: boolean, pitched = true) =>
+      processed ? `${pitched ? tomFileSuffix(semitones) : ""}${bpmSuffix}` : "",
+    [bpmSuffix, semitones],
+  );
+  // Rotulo de andamento para os cards de tocador ("· 110 BPM"), so quando o
+  // tempo mudou.
+  const bpmLabel = timeRatio !== 1 && effectiveBpm ? ` · ${Math.round(effectiveBpm)} BPM` : "";
+  // Faixa que o phase vocoder alcanca de verdade: timeRatio fica em [0.5, 2],
+  // entao o alvo tem que ficar entre base/2 e base*2 (fora disso o valor
+  // digitado nao e o que toca). Sem analise ainda, nao ha o que ajustar.
+  const bpmMin = baseBpm ? Math.max(40, Math.round(baseBpm / 2)) : 40;
+  const bpmMax = baseBpm ? Math.min(300, Math.round(baseBpm * 2)) : 300;
+  /** Confirma o rascunho digitado (blur/Enter): um commit, um reprocessamento. */
+  const commitBpm = useCallback(
+    (raw: string | null) => {
+      setBpmDraft(null);
+      if (raw === null) return;
+      const parsed = Number.parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return; // lixo/vazio: mantem o que ja toca
+      const clamped = Math.min(bpmMax, Math.max(bpmMin, parsed));
+      // Escrever o BPM detectado e o mesmo que voltar ao original.
+      setTargetBpm(clamped === baseBpm ? null : clamped);
+    },
+    [baseBpm, bpmMax, bpmMin],
+  );
+  /** Passo de 5 BPM a partir do que esta tocando agora. */
+  const stepBpm = useCallback(
+    (delta: number) => {
+      setBpmDraft(null);
+      setTargetBpm((value) => {
+        const base = value ?? baseBpm;
+        if (!base) return value;
+        const next = Math.min(bpmMax, Math.max(bpmMin, base + delta));
+        return next === baseBpm ? null : next;
+      });
+    },
+    [baseBpm, bpmMax, bpmMin],
+  );
 
   const stemBlob = useCallback(
     (id: StemId): Blob | null => {
@@ -770,13 +995,13 @@ export default function App() {
       const meta = STEMS.find((item) => item.id === id);
       const blob = stemBlob(id);
       if (blob && meta) {
-        // O sufixo so aparece quando essa trilha de fato saiu no tom novo
-        // (percussao e bateria ficam no original e nao levam a marca).
-        const tom = activeStems?.stems.has(id) ? tomFileSuffix(semitones) : "";
+        // O sufixo so aparece quando essa trilha de fato saiu reprocessada
+        // (percussao nao muda de tom, mas acompanha o andamento).
+        const tom = fileMarks(Boolean(activeStems?.stems.has(id)), !isPercussionStem(id));
         downloadBlob(blob, `${baseName} - ${meta.label}${corte}${tom}.${ext}`);
       }
     },
-    [activeStems, baseName, corte, ext, semitones, stemBlob],
+    [activeStems, baseName, corte, ext, fileMarks, stemBlob],
   );
 
   const downloadInstrumental = useCallback(() => {
@@ -788,18 +1013,17 @@ export default function App() {
       exportFormat,
       { range: rangeSamples },
     );
-    const tom = activeMix?.instrumental ? tomFileSuffix(semitones) : "";
+    const tom = fileMarks(Boolean(activeMix?.instrumental));
     downloadBlob(blob, `${baseName} - Instrumental${corte}${tom}.${ext}`);
-  }, [activeMix, baseName, corte, exportFormat, ext, instrumental, rangeSamples, semitones]);
+  }, [activeMix, baseName, corte, exportFormat, ext, fileMarks, instrumental, rangeSamples]);
 
   const downloadOriginal = useCallback(() => {
     const buffer = activeMix?.original ?? activeDecode?.original ?? originalBuffer;
     if (!buffer) return;
     const blob = encodeAudio(buffer.getChannelData(0), buffer.getChannelData(1), exportFormat);
-    const tom =
-      activeMix?.original || activeDecode?.original ? tomFileSuffix(semitones) : "";
+    const tom = fileMarks(Boolean(activeMix?.original || activeDecode?.original));
     downloadBlob(blob, `${baseName}${tom}.${ext}`);
-  }, [activeDecode, activeMix, baseName, exportFormat, ext, originalBuffer, semitones]);
+  }, [activeDecode, activeMix, baseName, exportFormat, ext, fileMarks, originalBuffer]);
 
   // --- Troca de voz (morph de timbre) ---
 
@@ -904,7 +1128,7 @@ export default function App() {
     const audio = activeVoice ?? voiceResult;
     if (!audio) return;
     const blob = encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples });
-    const tom = activeVoice ? tomFileSuffix(semitones) : "";
+    const tom = fileMarks(Boolean(activeVoice));
     downloadBlob(blob, `${baseName} - Voz transformada${corte}${tom}.${ext}`);
   }, [
     activeVoice,
@@ -912,8 +1136,8 @@ export default function App() {
     corte,
     exportFormat,
     ext,
+    fileMarks,
     rangeSamples,
-    semitones,
     voiceResult,
   ]);
 
@@ -1314,7 +1538,8 @@ export default function App() {
       const meta = STEMS.find((item) => item.id === stem.id);
       if (!meta) continue;
       const audio = activeStems?.stems.get(stem.id) ?? stem;
-      const tom = activeStems?.stems.has(stem.id) ? tomFileSuffix(semitones) : "";
+      // Percussao nao muda de tom (mas acompanha o andamento quando mudou).
+      const tom = fileMarks(Boolean(activeStems?.stems.has(stem.id)), !isPercussionStem(stem.id));
       entries.push({
         name: `${baseName} - ${meta.label}${corte}${tom}.${ext}`,
         blob: encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples }),
@@ -1322,7 +1547,7 @@ export default function App() {
     }
     const voice = activeVoice ?? voiceResult;
     if (voice) {
-      const tom = activeVoice ? tomFileSuffix(semitones) : "";
+      const tom = fileMarks(Boolean(activeVoice));
       entries.push({
         name: `${baseName} - Voz transformada${corte}${tom}.${ext}`,
         blob: encodeAudio(voice.left, voice.right, exportFormat, {
@@ -1332,7 +1557,7 @@ export default function App() {
     }
     const mix = activeMix?.instrumental ?? instrumental;
     if (mix) {
-      const tom = activeMix?.instrumental ? tomFileSuffix(semitones) : "";
+      const tom = fileMarks(Boolean(activeMix?.instrumental));
       entries.push({
         name: `${baseName} - Instrumental${corte}${tom}.${ext}`,
         blob: encodeAudio(
@@ -1375,7 +1600,7 @@ export default function App() {
     } finally {
       setZipState("idle");
     }
-  }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, instrumental, lyricsLrc, lyricsText, rangeSamples, results, semitones, voiceResult]);
+  }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, fileMarks, instrumental, lyricsLrc, lyricsText, rangeSamples, results, voiceResult]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1538,7 +1763,10 @@ export default function App() {
                       className="chip chip-bpm"
                       title={`Confianca: ${Math.round(analysis.bpmConfidence * 100)}%`}
                     >
-                      BPM: {analysis.bpm}
+                      BPM:{" "}
+                      {targetBpm !== null && timeRatio !== 1
+                        ? `${Math.round(effectiveBpm)} (de ${analysis.bpm})`
+                        : analysis.bpm}
                     </span>
                   </>
                 ) : null}
@@ -1582,6 +1810,71 @@ export default function App() {
                   )}
                 </div>
               </div>
+              <div
+                className="file-tone"
+                title="Troca o andamento da música sem mudar o tom: o phase vocoder estica e reamostra (processamento offline, com cache por andamento)."
+              >
+                <span className="file-tone-label">Andamento</span>
+                <div className="file-tone-btns">
+                  <button
+                    type="button"
+                    className="tone-mini-btn"
+                    onClick={() => stepBpm(-5)}
+                    disabled={!baseBpm || (effectiveBpm ? Math.round(effectiveBpm) : baseBpm) <= bpmMin}
+                    title="Diminuir 5 BPM"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    className="tone-bpm-input"
+                    min={bpmMin}
+                    max={bpmMax}
+                    step={1}
+                    inputMode="numeric"
+                    placeholder="BPM"
+                    // Mostra o que esta tocando; enquanto digita vale o rascunho.
+                    value={bpmDraft ?? (baseBpm ? String(Math.round(effectiveBpm)) : "")}
+                    disabled={!baseBpm}
+                    onChange={(event) => setBpmDraft(event.target.value)}
+                    // Commit em blur/Enter: digitar "110" nao refaz a musica
+                    // tres vezes no caminho.
+                    onBlur={(event) => commitBpm(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") commitBpm(event.currentTarget.value);
+                      if (event.key === "Escape") setBpmDraft(null);
+                    }}
+                    aria-label="Andamento alvo em BPM"
+                  />
+                  <button
+                    type="button"
+                    className="tone-mini-btn"
+                    onClick={() => stepBpm(5)}
+                    disabled={!baseBpm || (effectiveBpm ? Math.round(effectiveBpm) : baseBpm) >= bpmMax}
+                    title="Aumentar 5 BPM"
+                  >
+                    +
+                  </button>
+                  {targetBpm !== null && (
+                    <button
+                      type="button"
+                      className="tone-mini-btn tone-mini-reset"
+                      onClick={() => {
+                        setBpmDraft(null);
+                        setTargetBpm(null);
+                      }}
+                      title="Voltar ao andamento original"
+                    >
+                      original
+                    </button>
+                  )}
+                </div>
+                {baseBpm > 0 && targetBpm !== null && Math.round(targetBpm) !== baseBpm && (
+                  <span className="file-tone-note">
+                    detectado: {baseBpm} BPM · tom preservado
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -1606,7 +1899,11 @@ export default function App() {
               <div className="file-tone-progress">
                 <div className="file-tone-progress-body">
                   <div className="progress-label">
-                    Ajustando o tom {tomLabel(semitones)} · {Math.round(tomProgress * 100)}%
+                    {semitones !== 0
+                      ? `Ajustando tom ${tomLabel(semitones)}${timeRatio !== 1 && effectiveBpm ? ` e andamento ${Math.round(effectiveBpm)} BPM` : ""}`
+                      : `Ajustando andamento ${Math.round(effectiveBpm || 0)} BPM`}
+                    {" · "}
+                    {Math.round(tomProgress * 100)}%
                   </div>
                   <div className="bar">
                     <div
@@ -1618,7 +1915,10 @@ export default function App() {
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  onClick={() => setSemitones(0)}
+                  onClick={() => {
+                    setSemitones(0);
+                    setTargetBpm(null);
+                  }}
                 >
                   Cancelar
                 </button>
@@ -1645,7 +1945,7 @@ export default function App() {
               title="Original"
               subtitle={
                 activeMix?.original || activeDecode?.original
-                  ? `Faixa completa no tom ${tomLabel(semitones)}`
+                  ? `Faixa completa no tom ${tomLabel(semitones)}${bpmLabel}`
                   : "Faixa completa como foi enviada"
               }
               color="#8ea2c7"
@@ -2042,6 +2342,11 @@ export default function App() {
                 ...(voiceResult
                   ? [{ meta: STEM_BY_ID.get("clonedVocal")!, peaks: voiceResult.peaks }]
                   : []),
+                // Canal do metronome: onda com um impulso por tempo, na grade
+                // certa (mesma spec que gera os cliques).
+                ...(metronomeSpec
+                  ? [{ meta: METRONOME_META, peaks: metronomePeaks(metronomeSpec) }]
+                  : []),
               ]}
               states={mixer.states}
               position={mixer.position}
@@ -2055,8 +2360,16 @@ export default function App() {
               onSeek={mixer.seek}
               onState={(id, patch) => mixer.setTrackState(id, patch)}
               onSelection={setSelection}
-              onDownload={(id) => downloadStem(id)}
+              onDownload={(id) => {
+                // O metronomo e um click sintetizado: nao tem arquivo.
+                if (id !== "metronome") downloadStem(id);
+              }}
               downloadLabel={ext.toUpperCase()}
+              metronome={{
+                muted: metronomeMuted,
+                onToggle: toggleMetronome,
+                bpm: effectiveBpm || null,
+              }}
             />
           </section>
         )}
@@ -2207,7 +2520,11 @@ export default function App() {
                   abc={scoreAbc}
                   color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
                   playhead={
-                    scorePlayer.playing || scorePlayer.position > 0 ? scorePlayer.position : null
+                    scorePlayer.playing || scorePlayer.position > 0
+                      ? // A partitura e na linha do tempo original: quando o
+                        // tocador esta no tempo novo, converte de volta.
+                        scorePlayer.position / playedTimeRatio
+                      : null
                   }
                   playheadOffset={score.offset}
                   measureSeconds={score.measureSeconds}
@@ -2227,7 +2544,7 @@ export default function App() {
               title="Instrumental"
               subtitle={
                 activeMix?.instrumental
-                  ? `Sem vocais — no tom ${tomLabel(semitones)}`
+                  ? `Sem vocais — no tom ${tomLabel(semitones)}${bpmLabel}`
                   : "Sem vocais — ideal para karaoke"
               }
               color="#4ade80"

@@ -505,6 +505,9 @@ export function resolveVoicePlan(
 
   return {
     pitchRatio,
+    // O morph de timbre nao mexe no andamento: a fala/toada sai na duracao
+    // original. O tempo da musica e controlado separado (alvo de BPM).
+    timeRatio: 1,
     formantRatio: Math.pow(formantRatio, intensity),
     tiltDelta: clamp(profile.brightness, -4, 4) * intensity,
     vibratoCents: profile.vibratoCents * intensity,

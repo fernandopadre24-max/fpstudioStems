@@ -424,6 +424,15 @@ body {
   align-items: center;
   gap: 8px;
   font-size: 14px;
+  flex-wrap: wrap;
+}
+
+/* Nota pequena sob o controle ("detectado: 120 BPM · tom preservado") */
+.file-tone-note {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .file-tone-label {
@@ -444,6 +453,40 @@ body {
   color: var(--accent);
   font-weight: 700;
   font-size: 16px;
+}
+
+/* Campo numerico de andamento (BPM alvo): digita e commit no blur/Enter */
+.tone-bpm-input {
+  width: 66px;
+  min-width: 66px;
+  height: 26px;
+  padding: 0 6px;
+  text-align: center;
+  background: rgba(127, 127, 127, 0.09);
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 6px;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.tone-bpm-input::-webkit-outer-spin-button,
+.tone-bpm-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.tone-bpm-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tone-bpm-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .tone-mini-btn {
@@ -608,6 +651,41 @@ body {
 .btn-play {
   background: #1a1f2c;
   border-color: var(--line);
+}
+
+/* Metronomo no transporte do editor: um ponto que acende quando ligado */
+.metronome-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.metronome-btn b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.metronome-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(127, 127, 127, 0.45);
+  transition: all 0.15s ease;
+}
+
+/* Estado ligado: ponto no acento e borda acesa (o clique acompanha o loop) */
+.metronome-btn.btn-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.metronome-btn.btn-on .metronome-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
 }
 
 .progress-block {

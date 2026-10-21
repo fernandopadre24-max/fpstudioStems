@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SAMPLE_RATE, type StemId } from "../lib/constants";
 
+// O metronomo e uma faixa como as outras no mixer (volume, M/S, loop da
+// selecao A/B), so que nao vem da separacao: e um click sintetizado. Por isso
+// o id do aceita "metronome" alem dos StemId reais.
+export type MixerTrackId = StemId | "metronome";
+
 export interface MixerTrack {
-  id: StemId;
+  id: MixerTrackId;
   left: Float32Array;
   right: Float32Array;
+  /** Estado inicial da faixa (volume/mudo) quando ela aparece no mixer. */
+  initial?: Partial<TrackState>;
 }
 
 export interface TrackState {
@@ -162,7 +169,7 @@ export function useMixer(tracks: MixerTrack[] | null) {
     rangeRef.current = range;
   }, []);
 
-  const setTrackState = useCallback((id: StemId, patch: Partial<TrackState>) => {
+  const setTrackState = useCallback((id: MixerTrackId, patch: Partial<TrackState>) => {
     setStates((previous) => ({
       ...previous,
       [id]: { ...(previous[id] ?? defaultState()), ...patch },
@@ -173,9 +180,16 @@ export function useMixer(tracks: MixerTrack[] | null) {
     if (!tracks) return;
     stop();
     buffersRef.current = new Map();
-    const initial: Record<string, TrackState> = {};
-    for (const track of tracks) initial[track.id] = defaultState();
-    setStates(initial);
+    // Preserva o que o usuario ja ajustou (volume/mudo/solo) para as faixas
+    // que continuam: trocar o tom, o andamento ou a voz nao pode zerar o mix.
+    // Faixa nova (metronomo, trilha recem-gerada) entra com o estado inicial.
+    setStates((previous) => {
+      const next: Record<string, TrackState> = {};
+      for (const track of tracks) {
+        next[track.id] = previous[track.id] ?? { ...defaultState(), ...track.initial };
+      }
+      return next;
+    });
     setPosition(0);
     return () => stop();
   }, [tracks, stop]);
