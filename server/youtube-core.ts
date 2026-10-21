@@ -760,10 +760,10 @@ async function probeYtDlpSize(
 
 // Clientes do YouTube que ainda entregam URLs de formato diretas. Os demais
 // (web, visionos, ios, android_vr...) caem em SABR: vêm formatos sem URL.
-const defaultPlayerClients = "mweb,tv_embedded,tv,web_safari";
+const defaultPlayerClients = "android,ios,mweb,web_safari,tv_embedded";
 
 function clientArgs(playerClient?: string): string[] {
-  const client = playerClient?.trim() || (process.env.VERCEL ? defaultPlayerClients : "");
+  const client = playerClient?.trim() || (process.env.VERCEL ? defaultPlayerClients : "android,ios,mweb");
   return client ? ["--extractor-args", `youtube:player_client=${client}`] : [];
 }
 
@@ -772,8 +772,31 @@ function clientArgs(playerClient?: string): string[] {
 // reduzir o bloqueio em IP de datacenter.
 function runtimeArgs(): string[] {
   return process.env.VERCEL
-    ? ["--js-runtimes", `node:${process.execPath}`, "--impersonate", "chrome"]
-    : [];
+    ? [
+        "--js-runtimes",
+        `node:${process.execPath}`,
+        "--impersonate",
+        "chrome",
+        "--user-agent",
+        "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "--referer",
+        "https://www.youtube.com/",
+        "--add-header",
+        "Origin:https://www.youtube.com",
+        "--force-ipv4",
+        "--no-check-certificate",
+      ]
+    : [
+        "--no-warnings",
+        "--no-check-certificate",
+        "--force-ipv4",
+        "--user-agent",
+        "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "--referer",
+        "https://www.youtube.com/",
+        "--add-header",
+        "Origin:https://www.youtube.com",
+      ];
 }
 
 // Proxy opcional (residencial) para o yt-dlp. Configure YTDLP_PROXY no Vercel
