@@ -82,7 +82,7 @@ function resolveCookieContent(): string | null {
 
 function cookieSummary(content: string): string {
   const names = new Set<string>();
-  let expired = 0;
+  const expiredNames = new Set<string>();
   const now = Math.floor(Date.now() / 1000);
   for (const line of content.split(/\r?\n/)) {
     if (!line || line.startsWith("#")) continue;
@@ -92,12 +92,14 @@ function cookieSummary(content: string): string {
     const expiry = Number(parts[4]);
     if (!name) continue;
     names.add(name);
-    if (Number.isFinite(expiry) && expiry > 0 && expiry < now) expired++;
+    if (Number.isFinite(expiry) && expiry > 0 && expiry < now) expiredNames.add(name);
   }
-  const login = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID"].filter(
-    (name) => names.has(name),
-  );
-  return `; ${names.size} cookies, ${login.length}/7 de login, ${expired} vencidos`;
+  const login = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID"];
+  const present = login.filter((name) => names.has(name));
+  const expiredLogin = login.filter((name) => expiredNames.has(name));
+  return `; ${names.size} cookies, ${present.length}/7 de login, ${expiredNames.size} vencidos${
+    expiredLogin.length ? ` (login: ${expiredLogin.join(",")})` : ""
+  }`;
 }
 
 function describeCookieValue(): string {
