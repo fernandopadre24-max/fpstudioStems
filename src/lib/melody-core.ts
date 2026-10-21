@@ -48,7 +48,14 @@ const MIN_MIDI = 36; // C2
 const MAX_MIDI = 96; // C7
 const STATES = MAX_MIDI - MIN_MIDI + 1;
 const DECIMATION = 2;
-const FFT_SIZE = 2048;
+// A janela de 2048 amostras a 22,05 kHz da 10,8 Hz por bin — menos que um
+// semitom na regiao de 260 Hz, onde 59/60/61 leem o MESMO valor e o argmax
+// pisca entre eles (o vibrato de um quarto de tom vira saltos de varios
+// semitons e a nota se fragmenta). Com 4096 o bin cai para 5,4 Hz e os
+// candidatos adjacentes se separam. Custa ~2x no calculo do espectro, mas o
+// ataque continua sendo medido pela janela curta (ONSET_WINDOW), entao a
+// resolucao de tempo nao paga essa conta.
+const FFT_SIZE = 4096;
 const HOP = 256;
 const HARMONICS = 12;
 /** Raio (em bins) da janela em que se procura o piso local do espectro. */
@@ -669,6 +676,7 @@ export function extractMelody(
     midi: pitchOf(segment),
     confidence: segment.confidence,
   }));
+  stabilizeOctaves(notes);
 
   const midiValues = notes.map((note) => note.midi);
   return {
@@ -676,6 +684,46 @@ export function extractMelody(
     voicedRatio: frames > 0 ? voicedCount / frames : 0,
     medianMidi: median(midiValues),
   };
+}
+
+/**
+ * Oitavas trocadas.
+ *
+ * e' o defeito que mais estraga a pauta: o mesmo grau aparece como A#3 duas
+ * notas depois de A#2, e a linha salta uma oitava inteira no meio da frase. A
+ * voz raramente faz isso, entao um salto de ~oitava e' quase sempre erro de
+ * rastreio. Duas passadas, ambas conservadoras:
+ *
+ *  1. pico isolado — cercado por duas vizinhas proximas entre si;
+ *  2. desvio persistente — nota a uma oitava ou mais da mediana movel.
+ *
+ * O limiar de12 semitons (oitava exata ou mais) deixa passar saltos reais de
+ * setima, que existem na voz.
+ */
+function stabilizeOctaves(notes: MelodyNote[]): void {
+  for (let i = 1; i < notes.length - 1; i++) {
+    const previous = notes[i - 1].midi;
+    const next = notes[i + 1].midi;
+    if (Math.abs(previous - next) > 4) continue; // vizinhas tambem divergem
+    const current = notes[i].midi;
+    if (Math.abs(current - previous) < 11 || Math.abs(current - next) < 11) continue;
+    const center = (previous + next) / 2;
+    let corrected = current;
+    while (corrected - center > 6) corrected -= 12;
+    while (center - corrected > 6) corrected += 12;
+    if (corrected !== current) notes[i].midi = corrected;
+  }
+
+  const history: number[] = [];
+  for (const note of notes) {
+    if (history.length >= 3) {
+      const reference = median(history.slice().sort((a, b) => a - b));
+      while (note.midi - reference >= 12) note.midi -= 12;
+      while (reference - note.midi >= 12) note.midi += 12;
+    }
+    history.push(note.midi);
+    if (history.length > 9) history.shift();
+  }
 }
 
 /** Custo de um estado num quadro: perto do pico fino e com saliencia alta. */

@@ -273,37 +273,99 @@ function quantizeNotes(
   return events;
 }
 
-/**
- * Tempo da melodia a partir dos intervalos entre ataques: e a evidencia mais
- * direta do ritmo da propria linha (o BPM da analise vem do mix inteiro e
- * costuma errar). O valor e dobrado/dividido ate cair numa faixa usual.
- */
-function estimateMelodyTempo(notes: MelodyNote[], baseBpm: number): number {
+/** Ataques da melodia, com colapso das faisca mais juntas que 40 ms. */
+function onsetTimes(notes: MelodyNote[]): number[] {
   const onsets: number[] = [];
   for (const note of notes.slice().sort((a, b) => a.start - b.start)) {
     const last = onsets[onsets.length - 1];
     if (last === undefined || note.start - last > 0.04) onsets.push(note.start);
   }
+  return onsets;
+}
+
+/**
+ * Encaixe dos ataques numa grade de semicolcheias, CORRIGIDO PELO ACASO.
+ *
+ * O encaixe bruto favorece sempre o BPM mais alto: quanto mais fina a grade,
+ * mais ataques caem perto de uma marca sem que haja relacao nenhuma (com
+ * tolerancia de 30 ms, aos 160 BPM o acaso ja explica 64% dos ataques). E' por
+ * isso que uma busca ingenua sobe ate a borda do intervalo e o numero de
+ * compassos sai inflado. Dividindo pelo que um sinal aleatorio teria, as
+ * oitavas de tempo voltam a ser comparaveis — e nos dados ruidosos de verdade
+ * o grid mais grosso passa a vencer, que e' o resultado correto.
+ */
+function combFit(onsets: number[], bpm: number, tolerance = 0.03): number {
+  const step = 60 / bpm / 4;
+  if (!(step > 1e-4) || onsets.length < 6) return 0;
+  const chance = Math.min(1, (2 * tolerance) / step);
+  if (chance >= 0.98) return 0;
+
+  let best = 0;
+  // A fase e periodica no proprio passo, entao varrer [0, step) cobre todas.
+  for (let k = 0; k < 24; k++) {
+    const phase = (k / 24) * step;
+    let hits = 0;
+    for (const onset of onsets) {
+      const units = (onset - phase) / step;
+      if (Math.abs(units - Math.round(units)) * step <= tolerance) hits++;
+    }
+    if (hits > best) best = hits;
+  }
+  const rate = best / onsets.length;
+  return Math.max(0, (rate - chance) / (1 - chance));
+}
+
+/**
+ * Oitava de tempo.
+ *
+ * O erro classico aqui e' dobrar ou dividir a contagem: se a musica e' 75 BPM
+ * e lemos 150, todos os tempos viram semicolcheias e o numero de compassos
+ * DOBRA. A mediana do intervalo entre ataques nao decide isso (ela mede a
+ * duracao tipica das notas, nao o tempo), entao testa-se a grade contra as
+ * subdivisiones do BPM da analise e so se troca de oitava quando a evidencia
+ * for clara; em empate pratico vale a analise, que vem da bateria do mix.
+ */
+function estimateMelodyTempo(notes: MelodyNote[], baseBpm: number): number {
+  const onsets = onsetTimes(notes);
   if (onsets.length < 6) return baseBpm;
 
-  const intervals: number[] = [];
-  for (let i = 1; i < onsets.length; i++) intervals.push(onsets[i] - onsets[i - 1]);
-  intervals.sort((a, b) => a - b);
-  const median = intervals[intervals.length >> 1];
-  if (!(median > 0.05)) return baseBpm;
+  const anchor = baseBpm > 20 ? baseBpm : DEFAULT_BPM;
+  const seen = new Set<number>();
+  const add = (value: number) => {
+    const rounded = Math.round(value * 4) / 4;
+    if (rounded >= 55 && rounded <= 185) seen.add(rounded);
+  };
+  // So razoes musicais do BPM da analise. Um catalogo de valores soltos
+  // aceitava coisas como 90 para uma musica de 120 — fora de qualquer
+  // subdivisao e sem relacao com o que a analise ouviu.
+  add(anchor);
+  for (const mult of [0.5, 2 / 3, 0.75, 1, 4 / 3, 1.5, 2]) add(anchor * mult);
 
-  // Media dos intervalos proximos da mediana. A mediana sozinha oscila alguns
-  // milissegundos, o que ja basta para o BPM sair 117 em vez de 120 e a grade
-  // desalinhar no fim da musica (a nota vira pontuada + semicolcheia).
-  const close = intervals.filter((value) => Math.abs(value - median) <= median * 0.25);
-  const beat = close.reduce((total, value) => total + value, 0) / Math.max(1, close.length);
+  let bestScore = -1;
+  const scored: { bpm: number; score: number }[] = [];
+  for (const bpm of seen) {
+    // Fora da faixa natural a nota vira 32a ou o compasso encolhe demais.
+    const natural = bpm >= 70 && bpm <= 160 ? 1 : 0.92;
+    const score = combFit(onsets, bpm) * natural;
+    scored.push({ bpm, score });
+    if (score > bestScore) bestScore = score;
+  }
 
-  let bpm = 60 / beat;
-  while (bpm < 70) bpm *= 2;
-  while (bpm > 160) bpm /= 2;
-  // Se a melodia destoa demais do tempo da analise, e mais seguro confiar nela.
-  if (Math.abs(Math.log2(bpm / baseBpm)) > 0.7) return baseBpm;
-  return bpm;
+  // Empate pratico entre oitavas: o grid fino e o grosso explicam os ataques
+  // quase igual, entao quem decide e o BPM da analise — trocar de oitava aqui
+  // e' exatamente o que dobra ou metadeia a contagem de compassos.
+  const limit = bestScore * 0.97;
+  let best = anchor;
+  let bestDistance = Infinity;
+  for (const { bpm, score } of scored) {
+    if (score < limit) continue;
+    const distance = Math.abs(Math.log2(bpm / anchor));
+    if (distance < bestDistance - 1e-9) {
+      bestDistance = distance;
+      best = bpm;
+    }
+  }
+  return best;
 }
 
 interface GridFit {
@@ -311,43 +373,180 @@ interface GridFit {
   offset: number;
   /** Erro medio de quantizacao (em semicolcheias, 0..0.5). */
   error: number;
+  beatsPerBar: number;
+  beatType: number;
+}
+
+/** Compassos simples avaliados. So beatType 4: e' o que cobre quase toda musica
+ *  pop e mantem `gridSeconds = 60/bpm/4` consistente (o ramo 6/8 do codigo
+ *  antigo contava o tempo de um jeito diferente e desalinha a grade). */
+const METER_CANDIDATES: { beatsPerBar: number; prior: number }[] = [
+  { beatsPerBar: 4, prior: 1 },
+  { beatsPerBar: 3, prior: 0.94 },
+  { beatsPerBar: 2, prior: 0.88 },
+];
+
+/**
+ * Forca de um instante: a duracao da nota que ali comeca mais o silencio que a
+ * antecede. Frase nova costuma comecar no primeiro tempo com uma pausa antes —
+ * e' esse o acento que separa 4/4 de 2/4 (em 2/4 todo outro tempo vira
+ * "primeiro tempo", diluindo a media).
+ */
+function strengthAt(notes: MelodyNote[], time: number, tolerance: number): number {
+  let target: MelodyNote | null = null;
+  let distance = Infinity;
+  for (const note of notes) {
+    const delta = Math.abs(note.start - time);
+    if (delta < distance) {
+      distance = delta;
+      target = note;
+    }
+  }
+  if (!target || distance > tolerance) return 0;
+  const duration = Math.min(target.end - target.start, tolerance * 8);
+  let gap = 0;
+  for (const note of notes) {
+    if (note.end <= target.start && target.start - note.end < gap) continue;
+    if (note.end <= target.start && target.start - note.end > gap) gap = target.start - note.end;
+  }
+  return duration + 0.6 * Math.min(gap, tolerance * 4);
 }
 
 /**
- * Desloca o compasso 1 para a grade que melhor explica os ataques. Sem isso as
- * barras de compasso (e o cursor da partitura) ficam fora de fase com a musica.
+ * Separa, para um metro e uma fase, os tempos que sao primeiro tempo do
+ * compasso dos demais. Resultado normalizado (-1..1): positivo e' forte quando
+ * a nota que cai no1 tempo e mais longa/antecedida de pausa.
  */
-function fitPhase(notes: MelodyNote[], bpm: number, beatsPerBar: number): GridFit {
-  const onsets = notes.map((note) => note.start).sort((a, b) => a - b);
-  if (onsets.length < 4) return { offset: 0, error: 0.5 };
+function downbeatSeparation(
+  notes: MelodyNote[],
+  bpm: number,
+  downbeat: number,
+  beatsPerBar: number,
+): { score: number; samples: number } {
+  const beat = 60 / bpm;
+  const tolerance = beat * 0.45;
+  const down: number[] = [];
+  const other: number[] = [];
+  for (const note of notes) {
+    const index = Math.round((note.start - downbeat) / beat);
+    const time = downbeat + index * beat;
+    if (Math.abs(note.start - time) > tolerance) continue;
+    const strength = strengthAt(notes, note.start, tolerance);
+    if (strength <= 0) continue;
+    if (((index % beatsPerBar) + beatsPerBar) % beatsPerBar === 0) down.push(strength);
+    else other.push(strength);
+  }
+  if (down.length < 2 || other.length < 2) return { score: -1, samples: 0 };
+  const downMean = down.reduce((a, b) => a + b, 0) / down.length;
+  const otherMean = other.reduce((a, b) => a + b, 0) / other.length;
+  return {
+    score: (downMean - otherMean) / (downMean + otherMean + 1e-6),
+    samples: down.length + other.length,
+  };
+}
 
-  const grid = 60 / bpm / 4;
-  const measure = grid * beatsPerBar * 4;
-  const steps = 64;
-  let bestError = Infinity;
-  let bestPhase = 0;
-  for (let step = 0; step < steps; step++) {
-    const phase = (step / steps) * measure;
+/**
+ * Fase do grid + metro, buscados juntos.
+ *
+ * Sao duas perguntas diferentes e a antiga funcao so respondia a primeira:
+ *  1. em que semicolcheia os ataques se alinham — decide a grade;
+ *  2. qual semicolcheia, dentro do compasso, e o primeiro tempo, e quantos
+ *     tempos cabem — decide as barras.
+ *
+ * A segunda nao se resolve olhando aderencia de ataques: qualquer16a da grade
+ * "encaixa" igual, entao sem o acento de downbeat a barra cairia num lugar
+ * arbitrario e a contagem de compassos seria sorte.
+ */
+function fitGrid(
+  notes: MelodyNote[],
+  bpm: number,
+  forced?: { beatsPerBar: number; beatType: number },
+): GridFit {
+  const onsets = onsetTimes(notes);
+  const fallback: GridFit = { offset: 0, error: 0.5, beatsPerBar: 4, beatType: 4 };
+  if (onsets.length < 4) return fallback;
+
+  const step = 60 / bpm / 4;
+
+  // 1. alinhamento da grade (periodico no proprio passo).
+  let stepError = Infinity;
+  let stepPhase = 0;
+  for (let k = 0; k < 24; k++) {
+    const phase = (k / 24) * step;
     let error = 0;
     for (const onset of onsets) {
-      const value = (onset - phase) / grid;
-      error += Math.abs(value - Math.round(value));
+      const units = (onset - phase) / step;
+      error += Math.abs(units - Math.round(units));
     }
     error /= onsets.length;
-    if (error < bestError) {
-      bestError = error;
-      bestPhase = phase;
+    if (error < stepError) {
+      stepError = error;
+      stepPhase = phase;
     }
   }
 
-  // Encaixe ruim = a melodia nao confirma nenhuma grade; melhor nao deslocar.
-  if (bestError > 0.15) return { offset: 0, error: bestError };
+  // 2. metro + primeiro tempo. So se afasta de 4/4 quando a evidencia for
+  // clara: a maioria da musica pop e' 4/4, e trocar para 2/4 ou 3/4 errado
+  // DOBRA ou triplica a contagem de compassos — pior do que insistir em 4/4.
+  const candidates = forced
+    ? [{ beatsPerBar: forced.beatsPerBar, prior: 1 }]
+    : METER_CANDIDATES;
+  let bestOffset = stepPhase;
+  let bestMeter = candidates[0];
+  let bestScore = -Infinity;
+  let defaultScore = -Infinity;
+  let defaultOffset = stepPhase;
+  for (const candidate of candidates) {
+    const units = Math.round((candidate.beatsPerBar * 16) / (forced?.beatType ?? 4));
+    let candidateBest = -Infinity;
+    let candidateOffset = stepPhase;
+    for (let k = 0; k < units; k++) {
+      const downbeat = stepPhase + k * step;
+      const { score, samples } = downbeatSeparation(notes, bpm, downbeat, candidate.beatsPerBar);
+      if (samples < 4) continue;
+      if (score > candidateBest) {
+        candidateBest = score;
+        candidateOffset = downbeat;
+      }
+    }
+    if (candidateBest === -Infinity) continue;
+    const weighted = candidateBest * candidate.prior;
+    if (weighted > bestScore) {
+      bestScore = weighted;
+      bestOffset = candidateOffset;
+      bestMeter = candidate;
+    }
+    if (candidate.beatsPerBar === 4) {
+      defaultScore = candidateBest;
+      defaultOffset = candidateOffset;
+    }
+  }
+  // Margem alta de proposito. A maioria da musica pop e' 4/4, nao da para
+  // ouvir para conferir, e um metro alternativo errado DOBRA ou triplica a
+  // contagem de compassos — o proprio sintoma reclamado. So vale trocar quando
+  // a valsa se impoe sem margem de duvida e ha notas suficientes para julgar.
+  if (
+    bestMeter.beatsPerBar !== 4 &&
+    (notes.length < 12 || bestScore < defaultScore * 1.5)
+  ) {
+    bestMeter = { beatsPerBar: 4, prior: 1 };
+    bestOffset = defaultOffset === -Infinity ? stepPhase : defaultOffset;
+  }
+
+  const beatType = forced?.beatType ?? 4;
+  const measure = step * Math.round((bestMeter.beatsPerBar * 16) / beatType);
+  if (stepError > 0.15) return { ...fallback, offset: 0, error: stepError };
 
   // Mantem a primeira nota dentro do compasso 1 (o compasso pode comecar um
   // pouco antes do audio, o que vira uma pausa inicial na pauta).
-  let offset = bestPhase;
+  let offset = bestOffset;
   if (onsets[0] - offset < 0) offset -= measure;
-  return { offset, error: bestError };
+  return {
+    offset,
+    error: stepError,
+    beatsPerBar: bestMeter.beatsPerBar,
+    beatType,
+  };
 }
 
 function chordAt(chords: ChordSegment[], time: number): string {
@@ -447,17 +646,22 @@ export function cleanMelody(notes: MelodyNote[], gridSeconds: number): MelodyNot
 
 export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Score {
   const baseBpm = options.bpm && options.bpm > 20 ? options.bpm : DEFAULT_BPM;
-  const beatsPerBar = options.beatsPerBar ?? 4;
-  const beatType = options.beatType ?? 4;
-  const unitsPerMeasure = Math.round((beatsPerBar * 16) / beatType);
-  // Tempo e alinhamento do compasso tirados da propria melodia (a analise do
-  // mix pode errar o BPM, e isso desalinha toda a pauta).
+  // Tempo e metro tirados da propria melodia (a analise do mix pode errar o
+  // BPM, e isso desalinha toda a pauta; o metro fixo em 4/4 faz a contagem de
+  // compassos errar em valsa e composto).
   // As faiscas inflam a contagem de ataques, entao o tempo e estimado uma vez
   // nos dados crus (so para achar a grade) e de novo na lista ja limpa.
   const guessBpm = estimateMelodyTempo(notes, baseBpm);
   const cleaned = cleanMelody(notes, 60 / guessBpm / 4);
   const bpm = estimateMelodyTempo(cleaned, baseBpm);
-  const fit = fitPhase(cleaned, bpm, beatsPerBar);
+  const forced =
+    options.beatsPerBar && options.beatType
+      ? { beatsPerBar: options.beatsPerBar, beatType: options.beatType }
+      : undefined;
+  const fit = fitGrid(cleaned, bpm, forced);
+  const beatsPerBar = fit.beatsPerBar;
+  const beatType = fit.beatType;
+  const unitsPerMeasure = Math.round((beatsPerBar * 16) / beatType);
   const offset = fit.offset;
   const gridSeconds = 60 / bpm / 4; // semicolcheia
   const unitsPerBeat =
