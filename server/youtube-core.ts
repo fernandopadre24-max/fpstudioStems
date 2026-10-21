@@ -94,10 +94,21 @@ function cookieSummary(content: string): string {
     names.add(name);
     if (Number.isFinite(expiry) && expiry > 0 && expiry < now) expiredNames.add(name);
   }
-  const login = ["SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID"];
+  const login = [
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
+    "LOGIN_INFO",
+  ];
   const present = login.filter((name) => names.has(name));
   const expiredLogin = login.filter((name) => expiredNames.has(name));
-  return `; ${names.size} cookies, ${present.length}/7 de login, ${expiredNames.size} vencidos${
+  return `; ${names.size} cookies, ${present.length}/${login.length} de login, ${expiredNames.size} vencidos${
     expiredLogin.length ? ` (login: ${expiredLogin.join(",")})` : ""
   }`;
 }
