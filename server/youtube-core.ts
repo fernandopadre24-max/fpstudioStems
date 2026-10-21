@@ -744,11 +744,11 @@ export async function streamYouTubeAudio(
     /not a bot|no longer valid|rotated|Sign in to confirm/i.test(joinedErrors)
       ? " Dica: os cookies do YouTube podem estar expirados — exporte novamente logado no YouTube e rode o configurar-cookies."
       : "";
-  const important = errors
-    .filter((entry) => /^(yt-dlp|cookies|proxy)/.test(entry))
-    .slice(-3);
-  const detail = [...important, ...errors.slice(-2)].filter(
-    (entry, index, all) => all.indexOf(entry) === index,
+  const cookieEntry = errors.find((entry) => entry.startsWith("cookies:"));
+  const proxyEntry = errors.find((entry) => entry.startsWith("proxy:"));
+  const ytEntries = errors.filter((entry) => entry.startsWith("yt-dlp")).slice(-2);
+  const detail = [cookieEntry, proxyEntry, ...ytEntries].filter((entry): entry is string =>
+    Boolean(entry),
   );
   sendJson(response, 502, {
     error:
