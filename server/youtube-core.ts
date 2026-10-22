@@ -790,7 +790,7 @@ export async function streamYouTubeAudio(
   // instancia Invidious vem primeiro — mas com orcamento curto, porque hoje
   // quase todas estao fora do ar e o tempo e o que falta para o yt-dlp. No modo
   // local (ou com proxy residencial) o yt-dlp e direto e mais rapido.
-  const preferInvidious = Boolean(process.env.VERCEL) && !ytProxy && !playerClient;
+  const preferInvidious = Boolean(process.env.VERCEL) && !getProxy() && !playerClient;
   if (preferInvidious) {
     const invidiousDeadline = Math.min(deadline, Date.now() + INVIDIOUS_BUDGET_MS);
     if (await streamInvidiousAudio(id, response, errors, invidiousDeadline)) return;
@@ -877,14 +877,21 @@ function runtimeArgs(): string[] {
 // Proxy opcional (residencial) para o yt-dlp. Configure YTDLP_PROXY no Vercel
 // (ex.: http://usuario:senha@host:porta). Resolve o bloqueio de IP de datacenter
 // sem depender de cookies, servindo TODOS os usuarios do link publico.
-const ytProxy = process.env.YTDLP_PROXY?.trim() || "";
+function getProxy(): string {
+  return process.env.YTDLP_PROXY?.trim() || "";
+}
 
 function proxyArgs(): string[] {
-  return ytProxy ? ["--proxy", ytProxy] : [];
+  const proxy = getProxy();
+  return proxy ? ["--proxy", proxy] : [];
 }
 
 function proxyStatus(): string {
-  return ytProxy ? "proxy:sim" : "proxy:nao";
+  const proxy = getProxy();
+  if (!proxy) return "proxy:nao";
+  // Mascara usuario e senha caso existam (ex: http://user:pass@host:port -> http://user:***@host:port)
+  const masked = proxy.replace(/:\/\/([^:]+):([^@]+)@/, "://$1:***@");
+  return `proxy:sim (${masked})`;
 }
 
 // O download fica habilitado por padrao. No modo publico (Vercel) o audio vem

@@ -23,3 +23,7 @@ Thumbs.db
 .vercel
 .env*
 extensao-cookies/cookies.txt
+ 
+test_audio.*
+format_list.txt
+yt-dlp-info.txt
