@@ -197,17 +197,21 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
             <strong>O YouTube bloqueou o download pelo servidor online.</strong>
             {hosted && (
               <span>
-                Este endereco (Vercel) usa um IP de datacenter, e o YouTube agora recusa esse IP
-                mesmo com cookies de login validos. Duas saidas:
+                Este endereco (Vercel) usa um IP de datacenter, e o YouTube recusa esse IP mesmo com
+                cookies de login validos. Tres saidas:
               </span>
             )}
             <span>
-              1) Use o app rodando no seu PC (modo local/tunel): o download sai pelo seu IP e
-              funciona sempre.
+              1) Envie o arquivo de audio do seu PC/celular (botao de upload abaixo): funciona
+              sempre, inclusive neste link publico.
             </span>
             <span>
-              2) No link publico, configure um proxy residencial (YTDLP_PROXY) no servidor — ai o
-              download vale para todos os usuarios.
+              2) Use o app rodando no seu PC (modo local/tunel): o download do YouTube sai pelo seu
+              IP e funciona sempre.
+            </span>
+            <span>
+              3) No link publico, configure um proxy residencial (YTDLP_PROXY) no servidor — ai o
+              download do YouTube vale para todos os usuarios.
             </span>
             <span className="yt-block-detail">{error}</span>
           </div>
