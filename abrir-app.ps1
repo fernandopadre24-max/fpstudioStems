@@ -1,7 +1,15 @@
 # abrir-app.ps1
-# Sobe o app no seu PC e cria uma URL publica (tunel Cloudflare, sem conta).
-# O download do YouTube sai do seu IP residencial -> funciona sempre.
-# Voce so precisa deixar esta janela aberta. Ctrl+C encerra.
+# Sobe o app no seu PC (build de producao) e publica uma URL via tunel Cloudflare.
+# O download do YouTube sai do seu IP residencial -> nao sofre o bloqueio da Vercel.
+# Deixe esta janela aberta enquanto usa. Ctrl+C encerra tudo.
+#
+# Uso:
+#   powershell -ExecutionPolicy Bypass -File .\abrir-app.ps1
+#   powershell -ExecutionPolicy Bypass -File .\abrir-app.ps1 -NoBuild   (reaproveita o dist/)
+
+param(
+  [switch]$NoBuild
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -10,111 +18,266 @@ function Ok($m)   { Write-Host $m -ForegroundColor Green }
 function Warn($m) { Write-Host $m -ForegroundColor Yellow }
 function Err($m)  { Write-Host $m -ForegroundColor Red }
 
-$root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-$bin  = Join-Path $root ".bin"
+$root  = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$bin   = Join-Path $root ".bin"
 if (-not (Test-Path -LiteralPath $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
 
-$cfPath = Join-Path $bin "cloudflared.exe"
-$devLog = Join-Path $env:TEMP "stemroller-dev.log"
-$devErr = Join-Path $env:TEMP "stemroller-dev.err.log"
-$cfLog  = Join-Path $env:TEMP "stemroller-cf.log"
-$cfOut  = Join-Path $env:TEMP "stemroller-cf.out.log"
-$localPort = 5173
+$cfPath      = Join-Path $bin "cloudflared.exe"
+$urlFile     = Join-Path $bin "public-url.txt"
+$localPort   = 5173
+$localUrl    = "http://127.0.0.1:$localPort"
+$previewLog  = Join-Path $env:TEMP "stemroller-preview.log"
+$previewErr  = Join-Path $env:TEMP "stemroller-preview.err.log"
+$cfLog       = Join-Path $env:TEMP "stemroller-cf.log"
+$cfOut       = Join-Path $env:TEMP "stemroller-cf.out.log"
 
+$preview = $null
+$cf      = $null
+
+function Clear-Logs {
+  foreach ($f in @($previewLog, $previewErr, $cfLog, $cfOut)) {
+    if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Stop-Tree($proc) {
+  if ($proc -and -not $proc.HasExited) {
+    # Start-Process evita o NativeCommandError do PowerShell 5.1 (taskkill
+    # escreve em stderr e, com ErrorActionPreference=Stop, derrubaria o script).
+    try {
+      Start-Process -FilePath "taskkill.exe" -ArgumentList "/PID","$($proc.Id)","/T","/F" `
+        -WindowStyle Hidden -Wait | Out-Null
+    } catch { }
+  }
+}
+
+# --- app (vite preview = build de producao + APIs) -------------------------
+function Start-Preview {
+  Info "Subindo o app em $localUrl ..."
+  if (Test-Path -LiteralPath $previewLog) { Remove-Item -LiteralPath $previewLog -Force -ErrorAction SilentlyContinue }
+  if (Test-Path -LiteralPath $previewErr) { Remove-Item -LiteralPath $previewErr -Force -ErrorAction SilentlyContinue }
+  $script:preview = Start-Process -FilePath "cmd.exe" `
+    -ArgumentList "/c npm run preview -- --host 127.0.0.1 --port $localPort --strictPort" `
+    -WorkingDirectory $root -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput $previewLog -RedirectStandardError $previewErr
+}
+
+function Wait-Preview {
+  $deadline = (Get-Date).AddSeconds(90)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 700
+    try {
+      $r = Invoke-WebRequest -Uri $localUrl -UseBasicParsing -TimeoutSec 3
+      if ($r.StatusCode -eq 200) { return $true }
+    } catch { }
+    if ($preview.HasExited) { return $false }
+  }
+  return $false
+}
+
+# --- tunel publico ---------------------------------------------------------
+function Start-Tunnel {
+  if (Test-Path -LiteralPath $cfLog) { Remove-Item -LiteralPath $cfLog -Force -ErrorAction SilentlyContinue }
+  if (Test-Path -LiteralPath $cfOut) { Remove-Item -LiteralPath $cfOut -Force -ErrorAction SilentlyContinue }
+  Info "Criando a URL publica (tunel Cloudflare)..."
+  $script:cf = Start-Process -FilePath $cfPath `
+    -ArgumentList "tunnel","--url","$localUrl","--no-autoupdate" `
+    -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput $cfOut -RedirectStandardError $cfLog
+}
+
+function Get-TunnelUrl {
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 700
+    $txt = ""
+    if (Test-Path -LiteralPath $cfLog) { $txt += (Get-Content -LiteralPath $cfLog -Raw -ErrorAction SilentlyContinue) }
+    if (Test-Path -LiteralPath $cfOut) { $txt += (Get-Content -LiteralPath $cfOut -Raw -ErrorAction SilentlyContinue) }
+    $m = [regex]::Match($txt, "https://[a-z0-9-]+\.trycloudflare\.com")
+    if ($m.Success) { return $m.Value }
+    if ($cf.HasExited) { return $null }
+  }
+  return $null
+}
+
+function Test-Public {
+  param([string]$Url)
+  if (-not $Url) { return $false }
+  try {
+    $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 10
+    return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 400)
+  } catch {
+    return $false
+  }
+}
+
+function Publish-Url {
+  param([string]$Url, [switch]$Changed)
+
+  Set-Content -LiteralPath $urlFile -Value $Url -Encoding ASCII
+  try { Set-Clipboard -Value $Url } catch { }
+
+  Write-Host ""
+  Write-Host "============================================================" -ForegroundColor Green
+  Write-Host "  URL PUBLICA (use em qualquer aparelho):" -ForegroundColor Green
+  Write-Host "  $Url" -ForegroundColor Green
+  Write-Host "" 
+  Write-Host "  Local tambem funciona: $localUrl" -ForegroundColor Green
+  Write-Host "  Copiada para a area de transferencia." -ForegroundColor Green
+  if ($Changed) {
+    Write-Host "  (URL NOVA: o tunel reiniciou -- reenvie este link)" -ForegroundColor Yellow
+  }
+  Write-Host "============================================================" -ForegroundColor Green
+  Write-Host ""
+
+  try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $qrScript = Join-Path $root "scripts\print-qr.mjs"
+    if (Test-Path -LiteralPath $qrScript) { & node $qrScript $Url }
+  } catch {
+    Warn "Nao consegui desenhar o QR: $($_.Exception.Message)"
+  }
+
+  Write-Host ""
+  Warn "Deixe esta janela aberta. O app se recupera sozinho se o tunel cair."
+  Warn "Para encerrar: Ctrl+C (ou feche esta janela)."
+  Write-Host ""
+}
+
+# ===========================================================================
 Write-Host "============================================================" -ForegroundColor DarkCyan
-Write-Host "   FPStudio - Stems : abrir app (modo local + url publica)" -ForegroundColor DarkCyan
+Write-Host "   FPStudio - Stems : modo local (seu IP) + URL publica" -ForegroundColor DarkCyan
 Write-Host "============================================================" -ForegroundColor DarkCyan
 
-# 1) Garante o cloudflared
+# 1) cloudflared
 if (-not (Test-Path -LiteralPath $cfPath)) {
   Info "Baixando o cloudflared (~35 MB, so na primeira vez)..."
   $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-  curl.exe -L --fail -o $cfPath $url
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $cfPath -UseBasicParsing -TimeoutSec 300
+  } catch {
+    Err "Falha ao baixar o cloudflared: $($_.Exception.Message)"
+    exit 1
+  }
   if (-not (Test-Path -LiteralPath $cfPath)) { Err "Falha ao baixar o cloudflared."; exit 1 }
   Ok "cloudflared pronto."
 }
 
-# 2) Sobe o servidor do app
-Info "Iniciando o app (npm run dev)..."
-foreach ($f in @($devLog, $devErr, $cfLog, $cfOut)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-$dev = Start-Process -FilePath "cmd.exe" `
-  -ArgumentList "/c npm run dev -- --host --port $localPort" `
-  -WorkingDirectory $root -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput $devLog -RedirectStandardError $devErr
-
-$ready = $false
-$deadline = (Get-Date).AddSeconds(90)
-while ((Get-Date) -lt $deadline) {
-  Start-Sleep 2
-  try {
-    $r = Invoke-WebRequest -Uri "http://localhost:$localPort" -UseBasicParsing -TimeoutSec 3
-    if ($r.StatusCode -eq 200) { $ready = $true; break }
-  } catch { }
-  if ($dev.HasExited) { break }
-}
-if (-not $ready) {
-  Err "O app nao subiu a tempo. Veja o log: $devLog"
-  if (Test-Path $devErr) { Get-Content -LiteralPath $devErr -Tail 20 }
+# 2) build de producao
+if (-not $NoBuild) {
+  Info "Compilando o app (npm run build)..."
+  $buildLog = Join-Path $env:TEMP "stemroller-build.log"
+  $buildErr = Join-Path $env:TEMP "stemroller-build.err.log"
+  # O vite avisa sobre tamanho de chunk no stderr; com PowerShell 5.1 isso vira
+  # erro fatal. Start-Process redireciona para arquivo e so olhamos o ExitCode.
+  $build = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run build" `
+    -WorkingDirectory $root -WindowStyle Hidden -PassThru -Wait `
+    -RedirectStandardOutput $buildLog -RedirectStandardError $buildErr
+  if ($build.ExitCode -ne 0) {
+    Err "O build falhou. Veja: $buildLog"
+    if (Test-Path -LiteralPath $buildLog) { Get-Content -LiteralPath $buildLog -Tail 25 }
+    if (Test-Path -LiteralPath $buildErr) { Get-Content -LiteralPath $buildErr -Tail 25 }
+    exit 1
+  }
+  Ok "Build pronto."
+} elseif (-not (Test-Path -LiteralPath (Join-Path $root "dist\index.html"))) {
+  Err "Nao existe build em dist/. Rode sem -NoBuild."
   exit 1
 }
-Ok "App rodando em http://localhost:$localPort"
 
-# 3) Abre o tunel publico
-Info "Criando a URL publica (tunel Cloudflare)..."
-$cf = Start-Process -FilePath $cfPath `
-  -ArgumentList "tunnel","--url","http://localhost:$localPort","--no-autoupdate" `
-  -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput $cfOut -RedirectStandardError $cfLog
-
-$publicUrl = $null
-$deadline = (Get-Date).AddSeconds(60)
-while ((Get-Date) -lt $deadline) {
-  Start-Sleep 2
-  $txt = ""
-  if (Test-Path -LiteralPath $cfLog) { $txt += (Get-Content -LiteralPath $cfLog -Raw) }
-  if (Test-Path -LiteralPath $cfOut) { $txt += (Get-Content -LiteralPath $cfOut -Raw) }
-  $m = [regex]::Match($txt, "https://[a-z0-9-]+\.trycloudflare\.com")
-  if ($m.Success) { $publicUrl = $m.Value; break }
-  if ($cf.HasExited) { break }
+# 3) app
+Clear-Logs
+Start-Preview
+if (-not (Wait-Preview)) {
+  Err "O app nao subiu. Log: $previewLog"
+  if (Test-Path -LiteralPath $previewErr) { Get-Content -LiteralPath $previewErr -Tail 25 }
+  Stop-Tree $preview
+  exit 1
 }
+Ok "App rodando em $localUrl"
 
-Write-Host ""
-if ($publicUrl) {
-  Write-Host "============================================================" -ForegroundColor Green
-  Write-Host "  URL PUBLICA (use em qualquer lugar):" -ForegroundColor Green
-  Write-Host "  $publicUrl" -ForegroundColor Green
-  Write-Host "" 
-  Write-Host "  Local tambem funciona: http://localhost:$localPort" -ForegroundColor Green
-  Write-Host "============================================================" -ForegroundColor Green
-  Write-Host ""
-  Info "No celular: aponte a camera para o QR abaixo (ou digite a URL)."
-  try {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    $qrScript = Join-Path $root "scripts\print-qr.mjs"
-    if (Test-Path -LiteralPath $qrScript) {
-      & node $qrScript $publicUrl
-    } else {
-      Warn "QR indisponivel (scripts\print-qr.mjs nao encontrado)."
-    }
-  } catch {
-    Warn "Nao consegui desenhar o QR: $($_.Exception.Message)"
-  }
-  Write-Host ""
-  Warn "IMPORTANTE: deixe esta janela aberta enquanto usa o app."
-  Warn "Para encerrar: feche esta janela ou aperte Ctrl+C."
-  try { Start-Process $publicUrl } catch { }
-} else {
-  Err "Nao consegui criar a URL publica. Use a local: http://localhost:$localPort"
-  if (Test-Path -LiteralPath $cfLog) { Get-Content -LiteralPath $cfLog -Tail 20 }
-}
-
-# 4) Mantem rodando ate fechar
+# 4) pre-aquece o yt-dlp (o primeiro download do usuario ja sai rapido)
 try {
-  if (-not $cf.HasExited) { Wait-Process -Id $cf.Id }
+  Info "Preparando o yt-dlp (primeira vez baixa ~18 MB)..."
+  Invoke-WebRequest -Uri "$localUrl/api/youtube/status?prepare=1" -UseBasicParsing -TimeoutSec 180 | Out-Null
+  Ok "yt-dlp pronto."
+} catch {
+  Warn "Nao consegui preparar o yt-dlp agora (o app baixa no primeiro uso)."
+}
+
+# 5) tunel
+Start-Tunnel
+$publicUrl = Get-TunnelUrl
+if (-not $publicUrl) {
+  Err "Nao consegui criar a URL publica. Continue no local: $localUrl"
+  if (Test-Path -LiteralPath $cfLog) { Get-Content -LiteralPath $cfLog -Tail 20 }
+} else {
+  Publish-Url -Url $publicUrl
+  try { Start-Process $publicUrl } catch { }
+}
+
+# 6) vigia: app morreu -> sobe de novo; tunel caiu -> recria e publica URL nova
+$fails = 0
+try {
+  while ($true) {
+    Start-Sleep -Seconds 12
+
+    # Tunel no ar mas sem URL publicada (ex.: o log demorou): tenta de novo.
+    if (-not $publicUrl -and -not $cf.HasExited) {
+      $late = Get-TunnelUrl
+      if ($late) {
+        $publicUrl = $late
+        Publish-Url -Url $publicUrl -Changed
+        $fails = 0
+        continue
+      }
+    }
+
+    if ($preview.HasExited) {
+      Warn "O app parou. Reiniciando..."
+      Start-Preview
+      if (Wait-Preview) { Ok "App de volta em $localUrl" } else { Warn "O app ainda nao respondeu." }
+      $fails = 0
+    }
+
+    if ($cf.HasExited) {
+      Warn "O tunel caiu. Recriando..."
+      Start-Tunnel
+      $newUrl = Get-TunnelUrl
+      if ($newUrl) {
+        $publicUrl = $newUrl
+        Publish-Url -Url $publicUrl -Changed
+      } else {
+        Warn "Ainda sem URL publica; tento de novo em instantes."
+      }
+      $fails = 0
+      continue
+    }
+
+    if ($publicUrl) {
+      if (Test-Public -Url $publicUrl) {
+        $fails = 0
+      } else {
+        $fails += 1
+        if ($fails -ge 3) {
+          Warn "A URL publica parou de responder. Recriando o tunel..."
+          Stop-Tree $cf
+          Start-Tunnel
+          $newUrl = Get-TunnelUrl
+          if ($newUrl) {
+            $publicUrl = $newUrl
+            Publish-Url -Url $publicUrl -Changed
+          }
+          $fails = 0
+        }
+      }
+    }
+  }
 } finally {
   Warn "Encerrando..."
-  foreach ($p in @($cf, $dev)) {
-    if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch { } }
+  Stop-Tree $cf
+  Stop-Tree $preview
+  if (Test-Path -LiteralPath $urlFile) {
+    Remove-Item -LiteralPath $urlFile -Force -ErrorAction SilentlyContinue
   }
-  Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt (Get-Date).AddMinutes(-30) } | ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch { } }
 }
