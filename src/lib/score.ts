@@ -65,6 +65,8 @@ export interface Score {
 
 export interface ScoreOptions {
   bpm?: number;
+  /** Fase da grade de tempos medida no audio (segundos, pode ser negativa). */
+  beatOffset?: number;
   beatsPerBar?: number;
   beatType?: number;
   key?: { tonic: number; mode: "major" | "minor" } | null;
@@ -316,56 +318,34 @@ function combFit(onsets: number[], bpm: number, tolerance = 0.03): number {
 }
 
 /**
- * Oitava de tempo.
+ * Andamento da pauta.
  *
- * O erro classico aqui e' dobrar ou dividir a contagem: se a musica e' 75 BPM
- * e lemos 150, todos os tempos viram semicolcheias e o numero de compassos
- * DOBRA. A mediana do intervalo entre ataques nao decide isso (ela mede a
- * duracao tipica das notas, nao o tempo), entao testa-se a grade contra as
- * subdivisiones do BPM da analise e so se troca de oitava quando a evidencia
- * for clara; em empate pratico vale a analise, que vem da bateria do mix.
+ * Quando o mix ja foi analisado, o BPM da analise MANDA. Ele vem da percussao
+ * do mix inteiro e agora e' medido com fracao de BPM; a melodia sozinha nao tem
+ * como competir com isso — e o encaixe de ataques, por construcao, sempre
+ * prefere a grade mais fina. Era essa troca que transformava 88 BPM em 132
+ * (razao 3:2): a barra caia em 1,36 s em vez de 2,04 s, a pauta enchia de
+ * semicolcheias e ligaduras, e a contagem de compassos saia errada.
+ *
+ * Sem analise (arquivo ainda nao medido), o andamento e' procurado na propria
+ * melodia, com a correcao pelo acaso do combFit.
  */
 function estimateMelodyTempo(notes: MelodyNote[], baseBpm: number): number {
   const onsets = onsetTimes(notes);
-  if (onsets.length < 6) return baseBpm;
+  const anchor = baseBpm > 20 ? baseBpm : 0;
+  if (onsets.length < 6) return anchor || DEFAULT_BPM;
+  if (anchor) return anchor;
 
-  const anchor = baseBpm > 20 ? baseBpm : DEFAULT_BPM;
-  const seen = new Set<number>();
-  const add = (value: number) => {
-    const rounded = Math.round(value * 4) / 4;
-    if (rounded >= 55 && rounded <= 185) seen.add(rounded);
-  };
-  // So razoes musicais do BPM da analise. Um catalogo de valores soltos
-  // aceitava coisas como 90 para uma musica de 120 — fora de qualquer
-  // subdivisao e sem relacao com o que a analise ouviu.
-  add(anchor);
-  for (const mult of [0.5, 2 / 3, 0.75, 1, 4 / 3, 1.5, 2]) add(anchor * mult);
-
+  let bestBpm = DEFAULT_BPM;
   let bestScore = -1;
-  const scored: { bpm: number; score: number }[] = [];
-  for (const bpm of seen) {
-    // Fora da faixa natural a nota vira 32a ou o compasso encolhe demais.
-    const natural = bpm >= 70 && bpm <= 160 ? 1 : 0.92;
-    const score = combFit(onsets, bpm) * natural;
-    scored.push({ bpm, score });
-    if (score > bestScore) bestScore = score;
-  }
-
-  // Empate pratico entre oitavas: o grid fino e o grosso explicam os ataques
-  // quase igual, entao quem decide e o BPM da analise — trocar de oitava aqui
-  // e' exatamente o que dobra ou metadeia a contagem de compassos.
-  const limit = bestScore * 0.97;
-  let best = anchor;
-  let bestDistance = Infinity;
-  for (const { bpm, score } of scored) {
-    if (score < limit) continue;
-    const distance = Math.abs(Math.log2(bpm / anchor));
-    if (distance < bestDistance - 1e-9) {
-      bestDistance = distance;
-      best = bpm;
+  for (let bpm = 60; bpm <= 180; bpm += 0.5) {
+    const score = combFit(onsets, bpm);
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = bpm;
     }
   }
-  return best;
+  return bestBpm;
 }
 
 interface GridFit {
@@ -461,6 +441,7 @@ function fitGrid(
   notes: MelodyNote[],
   bpm: number,
   forced?: { beatsPerBar: number; beatType: number },
+  beatOffset?: number,
 ): GridFit {
   const onsets = onsetTimes(notes);
   const fallback: GridFit = { offset: 0, error: 0.5, beatsPerBar: 4, beatType: 4 };
@@ -485,6 +466,23 @@ function fitGrid(
     }
   }
 
+  // A fase medida no audio (bumbo/caixa) ancora a grade: assim a partitura e o
+  // metronomo caem no MESMO lugar, mesmo quando a melodia entra depois do
+  // primeiro tempo ou tem poucos ataques para o encaixe decidir sozinho.
+  const audioPhase =
+    beatOffset !== undefined && Number.isFinite(beatOffset)
+      ? ((beatOffset % step) + step) % step
+      : null;
+  if (audioPhase !== null) {
+    stepPhase = audioPhase;
+    let error = 0;
+    for (const onset of onsets) {
+      const units = (onset - stepPhase) / step;
+      error += Math.abs(units - Math.round(units));
+    }
+    stepError = error / onsets.length;
+  }
+
   // 2. metro + primeiro tempo. So se afasta de 4/4 quando a evidencia for
   // clara: a maioria da musica pop e' 4/4, e trocar para 2/4 ou 3/4 errado
   // DOBRA ou triplica a contagem de compassos — pior do que insistir em 4/4.
@@ -496,17 +494,37 @@ function fitGrid(
   let bestScore = -Infinity;
   let defaultScore = -Infinity;
   let defaultOffset = stepPhase;
+  // Com a fase do audio o primeiro tempo so pode cair num TEMPO (nao num
+  // semicolcheia qualquer): o compasso comeca onde a musica comeca.
+  const stride = audioPhase !== null ? 4 : 1;
   for (const candidate of candidates) {
     const units = Math.round((candidate.beatsPerBar * 16) / (forced?.beatType ?? 4));
     let candidateBest = -Infinity;
     let candidateOffset = stepPhase;
-    for (let k = 0; k < units; k++) {
-      const downbeat = stepPhase + k * step;
-      const { score, samples } = downbeatSeparation(notes, bpm, downbeat, candidate.beatsPerBar);
-      if (samples < 4) continue;
-      if (score > candidateBest) {
+    // A analise JA devolve a fase do "1" (escolhe o tempo mais forte do
+    // compasso). Em 4/4 ela entra direto: assim a partitura e o metronomo,
+    // que usam o mesmo numero, contam o compasso no mesmo lugar. Procurar a
+    // rotacao outra vez pela melodia desalinhava os dois.
+    const directDownbeat =
+      audioPhase !== null && candidate.beatsPerBar === 4 && beatOffset !== undefined
+        ? beatOffset
+        : null;
+    if (directDownbeat !== null) {
+      const { score, samples } = downbeatSeparation(notes, bpm, directDownbeat, candidate.beatsPerBar);
+      if (samples >= 4) {
         candidateBest = score;
-        candidateOffset = downbeat;
+        candidateOffset = directDownbeat;
+      }
+    }
+    if (candidateBest === -Infinity) {
+      for (let k = 0; k < units; k += stride) {
+        const downbeat = stepPhase + k * step;
+        const { score, samples } = downbeatSeparation(notes, bpm, downbeat, candidate.beatsPerBar);
+        if (samples < 4) continue;
+        if (score > candidateBest) {
+          candidateBest = score;
+          candidateOffset = downbeat;
+        }
       }
     }
     if (candidateBest === -Infinity) continue;
@@ -535,7 +553,14 @@ function fitGrid(
 
   const beatType = forced?.beatType ?? 4;
   const measure = step * Math.round((bestMeter.beatsPerBar * 16) / beatType);
-  if (stepError > 0.15) return { ...fallback, offset: 0, error: stepError };
+  // A tolerancia existe para o caso em que a fase veio da MELODIA (poucos
+  // ataques, grade duvidosa). Com a fase medida no audio ela nao se aplica: o
+  // cantor costuma estar alguns milissegundos atras da bateria e isso e' normal,
+  // nao motivo para jogar a grade de volta ao zero (o que desalinhava a pauta
+  // inteira em relacao ao metronomo).
+  if (audioPhase === null && stepError > 0.15) {
+    return { ...fallback, offset: 0, error: stepError };
+  }
 
   // Mantem a primeira nota dentro do compasso 1 (o compasso pode comecar um
   // pouco antes do audio, o que vira uma pausa inicial na pauta).
@@ -645,20 +670,17 @@ export function cleanMelody(notes: MelodyNote[], gridSeconds: number): MelodyNot
 }
 
 export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Score {
-  const baseBpm = options.bpm && options.bpm > 20 ? options.bpm : DEFAULT_BPM;
-  // Tempo e metro tirados da propria melodia (a analise do mix pode errar o
-  // BPM, e isso desalinha toda a pauta; o metro fixo em 4/4 faz a contagem de
-  // compassos errar em valsa e composto).
-  // As faiscas inflam a contagem de ataques, entao o tempo e estimado uma vez
-  // nos dados crus (so para achar a grade) e de novo na lista ja limpa.
-  const guessBpm = estimateMelodyTempo(notes, baseBpm);
-  const cleaned = cleanMelody(notes, 60 / guessBpm / 4);
-  const bpm = estimateMelodyTempo(cleaned, baseBpm);
+  // 0 = sem analise: o andamento e' estimado na melodia.
+  const baseBpm = options.bpm && options.bpm > 20 ? options.bpm : 0;
+  // O BPM da analise vem do mix (bumbo/caixa) e manda quando existe; a melodia
+  // serve para limpar as faiscas e para o caso de nao haver analise.
+  const bpm = estimateMelodyTempo(notes, baseBpm);
+  const cleaned = cleanMelody(notes, 60 / bpm / 4);
   const forced =
     options.beatsPerBar && options.beatType
       ? { beatsPerBar: options.beatsPerBar, beatType: options.beatType }
       : undefined;
-  const fit = fitGrid(cleaned, bpm, forced);
+  const fit = fitGrid(cleaned, bpm, forced, options.beatOffset);
   const beatsPerBar = fit.beatsPerBar;
   const beatType = fit.beatType;
   const unitsPerMeasure = Math.round((beatsPerBar * 16) / beatType);
@@ -777,14 +799,21 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
 
   if (currentEvents.length > 0) {
     if (remainingInMeasure > 0) {
-      currentEvents.push({
-        kind: "rest",
-        units: remainingInMeasure,
-        typeName: UNIT_TYPE[remainingInMeasure]?.typeName ?? "16th",
-        dotted: UNIT_TYPE[remainingInMeasure]?.dotted ?? false,
-        tieStart: false,
-        tieEnd: false,
-      });
+      // O que sobra do ultimo compasso vira pausas VALIDAS (seminima, colcheia,
+      // ...). Antes saia um evento unico com a duracao que faltasse (13, por
+      // exemplo) marcado como "semicolcheia": o MusicXML dizia uma figura e
+      // durava outra.
+      for (const units of decompose(remainingInMeasure)) {
+        const meta = UNIT_TYPE[units] ?? UNIT_TYPE[1];
+        currentEvents.push({
+          kind: "rest",
+          units,
+          typeName: meta.typeName,
+          dotted: meta.dotted,
+          tieStart: false,
+          tieEnd: false,
+        });
+      }
     }
     flushMeasure();
   }

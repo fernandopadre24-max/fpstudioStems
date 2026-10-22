@@ -24,6 +24,7 @@ import {
   analyzeMelody,
   analyzeTrack,
   type ChordSegment,
+  type MelodyNote,
   type TrackAnalysis,
 } from "./lib/analysis";
 import { cifraToText, fetchCifra, type CifraQuery, type CifraResult } from "./lib/chords";
@@ -76,7 +77,7 @@ import {
   transposeStereo,
   type AudioPair,
 } from "./lib/tom";
-import { transposeNote } from "./lib/transpose";
+import { transposeNote, transposeSingleChord } from "./lib/transpose";
 import { ScoreView } from "./components/ScoreView";
 import { VoiceCard, type VoicePreview } from "./components/VoiceCard";
 import { applyVoice, measureVoice, type VoiceJob } from "./lib/voiceClient";
@@ -120,6 +121,23 @@ interface VoiceResult {
   right: Float32Array;
   peaks: Float32Array;
   label: string;
+}
+
+/** Melodia crua da trilha escolhida, antes de virar pauta. Guardar os ataques
+ *  (e nao a partitura pronta) deixa o tom e o andamento mudarem na hora, sem
+ *  ler a trilha de novo. */
+interface ScoreBase {
+  notes: MelodyNote[];
+  medianMidi: number;
+  instrumentLabel: string;
+  title: string;
+  artist: string;
+  key: TrackAnalysis["key"] | null;
+  /** BPM medido no audio original (0 = analise indisponivel). */
+  bpm: number;
+  /** Fase da grade no audio original (segundos). */
+  beatOffset: number;
+  chords: ChordSegment[];
 }
 
 interface TomAudio {
@@ -280,7 +298,7 @@ export default function App() {
   const [scoreStatus, setScoreStatus] = useState<"idle" | "working">("idle");
   const [scoreError, setScoreError] = useState<string | null>(null);
   const [scoreWarning, setScoreWarning] = useState<string | null>(null);
-  const [score, setScore] = useState<Score | null>(null);
+  const [scoreBase, setScoreBase] = useState<ScoreBase | null>(null);
   const [scoreStep, setScoreStep] = useState("");
   const [voiceProfileId, setVoiceProfileId] = useState(DEFAULT_VOICE_ID);
   const [voiceIntensity, setVoiceIntensity] = useState(1);
@@ -409,7 +427,7 @@ export default function App() {
   // (audio 9% mais curto, 10% mais rapido; o tom fica onde estava). O batch de
   // transformacao usa o mesmo caminho do tom — estica e reamostra — e as
   // trilhas novas entram no mixer com essa duracao.
-  const baseBpm = analysis?.bpm ?? score?.bpm ?? 0;
+  const baseBpm = analysis?.bpm ?? scoreBase?.bpm ?? 0;
   const timeRatio = useMemo(() => {
     if (!targetBpm || !baseBpm) return 1;
     const ratio = baseBpm / targetBpm;
@@ -419,6 +437,51 @@ export default function App() {
   }, [baseBpm, targetBpm]);
   // Andamento efetivo que o ouvinte vai sentir (para rótulos e nome de arquivo).
   const effectiveBpm = baseBpm && timeRatio !== 1 ? baseBpm / timeRatio : baseBpm;
+
+  // --- Partitura ---
+  //
+  // A pauta acompanha o que esta tocando: com tom trocado as notas e a armadura
+  // sobem/descem junto, com andamento trocado os tempos sao multiplicados pela
+  // MESMA razao do audio (o phase vocoder estica, entao a barra continua caindo
+  // no lugar). Recalcular a partir da melodia crua e rapido (dezenas de ms) e
+  // evita ler a trilha de novo a cada ajuste.
+  const score = useMemo<Score | null>(() => {
+    if (!scoreBase) return null;
+    const ratio = timeRatio;
+    const shift = semitones;
+    const sameTime = ratio === 1;
+    const notes =
+      sameTime && shift === 0
+        ? scoreBase.notes
+        : scoreBase.notes.map((note) => ({
+            ...note,
+            start: note.start * ratio,
+            end: note.end * ratio,
+            midi: note.midi + shift,
+          }));
+    const key = scoreBase.key
+      ? { tonic: ((scoreBase.key.tonic + shift) % 12 + 12) % 12, mode: scoreBase.key.mode }
+      : null;
+    const chords =
+      sameTime && shift === 0
+        ? scoreBase.chords
+        : scoreBase.chords.map((segment) => ({
+            ...segment,
+            start: segment.start * ratio,
+            end: segment.end * ratio,
+            chord: shift === 0 ? segment.chord : transposeSingleChord(segment.chord, shift),
+          }));
+    return buildScore(notes, {
+      bpm: scoreBase.bpm > 0 ? scoreBase.bpm / ratio : undefined,
+      beatOffset: scoreBase.bpm > 0 ? scoreBase.beatOffset * ratio : undefined,
+      key,
+      chords,
+      instrumentLabel: scoreBase.instrumentLabel,
+      title: scoreBase.title,
+      artist: scoreBase.artist,
+      medianMidi: scoreBase.medianMidi + shift,
+    });
+  }, [scoreBase, semitones, timeRatio]);
 
   // --- Troca de tom ---
   //
@@ -1314,7 +1377,7 @@ export default function App() {
   }, [scoreSources]);
 
   useEffect(() => {
-    setScore(null);
+    setScoreBase(null);
     setScoreError(null);
   }, [file, scoreSource]);
 
@@ -1342,14 +1405,14 @@ export default function App() {
         source === "original" ? null : results?.find((item) => item.id === source) ?? null;
       if (source !== "original" && !stem) {
         pendingScoreRef.current = source;
-        setScore(null);
+        setScoreBase(null);
         setScoreStatus("working");
         setScoreStep("Separando as trilhas...");
         startSeparation();
         return;
       }
 
-      setScore(null);
+      setScoreBase(null);
       setScoreStatus("working");
       setScoreStep("Extraindo a melodia...");
       try {
@@ -1384,16 +1447,17 @@ export default function App() {
           }
         }
 
-        const built = buildScore(melody.notes, {
-          bpm: analysis?.bpm,
-          key: analysis?.key ?? null,
-          chords: chordSegments ?? [],
+        setScoreBase({
+          notes: melody.notes,
+          medianMidi: melody.medianMidi,
           instrumentLabel,
           title: identity.title || baseName,
           artist: identity.artist,
-          medianMidi: melody.medianMidi,
+          key: analysis?.key ?? null,
+          bpm: analysis?.bpm ?? 0,
+          beatOffset: analysis?.beatOffset ?? 0,
+          chords: chordSegments ?? [],
         });
-        setScore(built);
 
         // A partitura so vale se a leitura for de UMA melodia. Quando o leitor
         // recebe uma trilha que ainda mistura instrumentos, ele troca de fonte
