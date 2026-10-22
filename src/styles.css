@@ -2555,6 +2555,24 @@ body {
   margin-top: 16px;
 }
 
+/* Cabecalho com a aba: titulo a esquerda, botao Abrir/Fechar a direita. */
+.voice-head {
+  align-items: flex-start;
+}
+
+/* Sem isso o texto longo empurra o botao para a linha de baixo. */
+.voice-head-text {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.voice-toggle {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 12.5px;
+  padding: 6px 12px;
+}
+
 .voice-error {
   margin: 12px 0 0;
   padding: 12px 14px;
