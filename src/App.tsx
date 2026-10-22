@@ -321,12 +321,13 @@ export default function App() {
   const [scoreBase, setScoreBase] = useState<ScoreBase | null>(null);
   const [scoreStep, setScoreStep] = useState("");
   // Aba recolhivel da partitura: mesmo padrao do "Clonar Voz" (seta no canto).
-  // Comeca ABERTA (e o painel principal do editor); a escolha fica guardada.
+  // Comeca FECHADA (abre so quando a pessoa quiser ver a pauta) e a escolha
+  // fica guardada, entao quem abriu nao precisa abrir de novo.
   const [scoreOpen, setScoreOpen] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem("fps:partitura-aberta") !== "0";
+      return window.localStorage.getItem("fps:partitura-aberta") === "1";
     } catch {
-      return true;
+      return false;
     }
   });
   const toggleScoreOpen = () => {
@@ -2571,7 +2572,10 @@ export default function App() {
           <section className="panel score-panel">
             <div className="section-head section-head-row voice-head">
               <div className="voice-head-text">
-                <h2>Partitura</h2>
+                <h2>
+                  Partitura
+                  <span className="voice-tag">em fase experimental</span>
+                </h2>
                 {scoreOpen && (
                   <p>
                     Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
