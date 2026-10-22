@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { formatTime } from "../lib/audio";
+import { friendlyError } from "../lib/errors";
 import {
   downloadYouTubeAudio,
   getYtDlpStatus,
@@ -64,7 +65,7 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
       } catch (cause) {
         if (!active) return;
         setEngine("error");
-        setEngineError(cause instanceof Error ? cause.message : String(cause));
+        setEngineError(friendlyError(cause));
       }
     };
 
@@ -78,7 +79,6 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
   const pick = useCallback(
     async (result: YouTubeResult) => {
       if (downloading) return;
-      console.log('[YouTubeSearch] Starting download for:', result.id, result.title);
       setDownloading(result.id);
       setProgress({ loaded: 0, total: null });
       setCancelling(false);
@@ -92,15 +92,10 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
           setProgress,
           controller.signal,
         );
-        console.log('[YouTubeSearch] Download complete, file:', file.name, file.size, file.type);
         onSelect(file, { title: result.title, artist: result.channel });
       } catch (cause) {
-        if (controller.signal.aborted) {
-          console.log('[YouTubeSearch] Download cancelled');
-        } else {
-          console.error('[YouTubeSearch] Download error:', cause);
-          setError(cause instanceof Error ? cause.message : String(cause));
-        }
+        // Cancelamento do usuario nao e erro.
+        if (!controller.signal.aborted) setError(friendlyError(cause));
       } finally {
         abortRef.current = null;
         setDownloading(null);
@@ -142,7 +137,7 @@ export function YouTubeSearch({ disabled, onSelect }: YouTubeSearchProps) {
       try {
         setResults(await searchYouTube(term));
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(friendlyError(cause));
       } finally {
         setSearching(false);
       }
