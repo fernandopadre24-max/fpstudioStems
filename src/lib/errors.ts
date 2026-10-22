@@ -10,9 +10,10 @@ export function friendlyError(cause: unknown): string {
   const message = cause instanceof Error ? cause.message : String(cause);
   if (NETWORK.test(message)) {
     return (
-      "Nao consegui falar com o servidor do app (a conexao caiu antes da resposta). " +
-      "Se voce esta usando o modo local/tunel, confira se a janela do abrir-app continua aberta: " +
-      "quando o tunel reinicia a URL muda. Recarregue a pagina e tente de novo."
+      "Nao consegui falar com o servidor do app: a conexao caiu antes da resposta " +
+      "(o servidor pode ter demorado demais). Tente de novo. " +
+      "Se voce esta no modo local/tunel, confira se a janela do abrir-app continua aberta: " +
+      "quando o tunel reinicia, a URL muda."
     );
   }
   return message;

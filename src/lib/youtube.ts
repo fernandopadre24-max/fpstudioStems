@@ -72,8 +72,9 @@ export async function downloadYouTubeAudio(
   signal?: AbortSignal,
 ): Promise<File> {
   // No modo publico o caminho de audio oscila (instancias/yt-dlp); tentamos de
-  // novo algumas vezes. Bloqueio de IP e definitivo: nao insiste.
-  const attempts = 3;
+  // novo uma vez. Bloqueio de IP e definitivo: nao insiste. Duas tentativas
+  // mantem a espera curta quando o servidor esta apenas lento.
+  const attempts = 2;
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {

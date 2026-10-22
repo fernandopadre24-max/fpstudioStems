@@ -20,6 +20,27 @@ const FUNCTION_BUDGET_MS = 50_000;
 const INVIDIOUS_BUDGET_MS = 10_000;
 const remainingMs = (deadline: number): number => Math.max(0, deadline - Date.now());
 
+/** Limita uma espera (download de binario, PO token) para nao furar o orcamento. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  const limit = Math.max(1500, ms);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label}: tempo esgotado (${Math.round(limit / 1000)}s)`)),
+      limit,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (cause) => {
+        clearTimeout(timer);
+        reject(cause);
+      },
+    );
+  });
+}
+
 function releaseAsset(platform: string): string {
   if (platform === "win32") return "yt-dlp.exe";
   if (platform === "linux") return "yt-dlp_linux";
@@ -566,7 +587,7 @@ async function invidiousJson<T>(base: string, pathAndQuery: string): Promise<T |
     const response = await fetch(url, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(6_000),
+      signal: AbortSignal.timeout(4_000),
     });
     if (response.status === 200) {
       const contentType = response.headers.get("content-type") ?? "";
@@ -627,7 +648,7 @@ async function fetchInvidiousStream(base: string, audioUrl: string): Promise<Res
     const audioResponse = await fetch(current, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(12_000),
+      signal: AbortSignal.timeout(8_000),
     });
 
     if (audioResponse.status === 200 || audioResponse.status === 206) {
@@ -786,11 +807,16 @@ export async function streamYouTubeAudio(
   // ou o modo local/tunel.
   const ipBlocked = /not a bot|Sign in to confirm|no longer valid|rotated/i.test(joinedErrors);
   const exhausted = remainingMs(deadline) < 1_000;
+  // Instancia fria: o binario/plugin ainda estava sendo baixado quando o prazo
+  // acabou. Nao e bloqueio — repetir logo resolve.
+  const preparing = /ainda baixando|plugin POT/i.test(joinedErrors);
   const blockHint = ipBlocked
     ? " Use o modo local/tunel ou configure um proxy residencial (YTDLP_PROXY) no servidor."
-    : exhausted
-      ? " O tempo do servidor (60s) acabou antes de o audio comecar a tocar; tente de novo."
-      : "";
+    : preparing
+      ? " O servidor estava se preparando (primeira execucao); tente de novo em alguns segundos."
+      : exhausted
+        ? " O tempo do servidor (60s) acabou antes de o audio comecar a tocar; tente de novo."
+        : "";
   const cookieEntry = errors.find((entry) => entry.startsWith("cookies:"));
   const proxyEntry = errors.find((entry) => entry.startsWith("proxy:"));
   const ytEntries = errors.filter((entry) => entry.startsWith("yt-dlp")).slice(-2);
@@ -966,13 +992,23 @@ async function streamYtDlpAudio(
 ): Promise<boolean> {
   let executable: string;
   try {
-    executable = await ensureYtDlp();
+    // Baixar o binario na primeira execucao pode demorar; nao deixa isso comer
+    // o tempo que o yt-dlp precisa para falar com o YouTube.
+    executable = await withTimeout(
+      ensureYtDlp(),
+      Math.min(20_000, remainingMs(deadline) - 22_000),
+      "yt-dlp ainda baixando",
+    );
   } catch (cause) {
     errors.push(`yt-dlp indisponivel: ${cause instanceof Error ? cause.message : String(cause)}`);
     return false;
   }
   const cookies = noCookies ? [] : await cookieArgs();
-  const pot = await potArgs();
+  const pot = await withTimeout(
+    potArgs(),
+    Math.min(8_000, remainingMs(deadline) - 14_000),
+    "plugin POT",
+  ).catch(() => []);
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
   const prefix = [
     "-f",
@@ -984,6 +1020,12 @@ async function streamYtDlpAudio(
     "--no-part",
     "--socket-timeout",
     "10",
+    // Fragmento faltando nao pode virar espera infinita: com o teto de 60s da
+    // funcao, desistimos rapido e devolvemos a mensagem.
+    "--fragment-retries",
+    "3",
+    "--retries",
+    "2",
     ...runtimeArgs(),
     ...clientArgs(playerClient),
     ...pot,
@@ -992,7 +1034,7 @@ async function streamYtDlpAudio(
 
   // Prazo para o yt-dlp comecar a tocar: o que sobrar do orcamento da funcao,
   // com uma folga para escrever a resposta caso ele falhe.
-  const waitMs = Math.max(8_000, Math.min(38_000, remainingMs(deadline) - 6_000));
+  const waitMs = Math.max(8_000, Math.min(28_000, remainingMs(deadline) - 5_000));
   const first = await runYtDlpAttempt(executable, [...prefix, ...cookies, watchUrl], response, waitMs);
   if (first.ok) return true;
   errors.push(`yt-dlp${cookies.length ? " (cookies)" : ""}: ${stderrTail(first.stderr)}`);
@@ -1001,7 +1043,7 @@ async function streamYtDlpAudio(
   // suspeita e pede login. Se o erro foi esse, tenta de novo sem cookies,
   // apoiado so no PO token. Se o primeiro teste ja foi sem cookies, nao repete.
   if (cookies.length && /sign in to confirm|not a bot/i.test(first.stderr)) {
-    const rest = Math.max(6_000, Math.min(20_000, remainingMs(deadline) - 5_000));
+    const rest = Math.max(6_000, Math.min(16_000, remainingMs(deadline) - 5_000));
     const second = await runYtDlpAttempt(executable, [...prefix, watchUrl], response, rest);
     if (second.ok) return true;
     errors.push(`yt-dlp (sem cookies): ${stderrTail(second.stderr)}`);
