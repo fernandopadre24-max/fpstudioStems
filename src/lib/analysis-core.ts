@@ -6,8 +6,13 @@ export interface KeyEstimate {
 }
 
 export interface TrackAnalysis {
+  /** Andamento em BPM, com fracao (ex.: 127.63). O detector arredondava e o
+   * clique do metronomo ia atrasando ao longo da musica. */
   bpm: number;
   bpmConfidence: number;
+  /** Fase da grade de tempos em segundos. Pode ser negativa: nesse caso o
+   * compasso comecou antes do audio e o primeiro clique cai no tempo seguinte. */
+  beatOffset: number;
   key: KeyEstimate;
   chroma: number[];
 }
@@ -77,12 +82,127 @@ function foldTempo(bpm: number): number {
   return value;
 }
 
-function estimateTempo(signal: Float32Array, sampleRate: number): { bpm: number; confidence: number } {
+/**
+ * Refina andamento e fase sobre o envelope de ataques.
+ *
+ * A autocorrelacao so entrega o lag inteiro e, com hop de 512 a 44,1 kHz, cada
+ * frame vale ~11,6 ms: perto de 128 BPM isso e quase 3 BPM de erro (o clique
+ * "bate" no inicio e vai atrasando). Aqui duas coisas acontecem:
+ *
+ * 1. Varredura fina de BPM (+-3,5% em passos de 0,02) dobrando o envelope no
+ *    periodo: no andamento certo a energia se concentra numa faixa estreita de
+ *    fase; no errado ela se espalha. O contraste entre pico e media escolhe.
+ * 2. Com o BPM escolhido, varre a fase em 200 passos (resolucao de ~2-10 ms)
+ *    somando a energia de todos os tempos da musica, nao so do inicio.
+ *
+ * Por fim escolhe qual tempo do compasso e o "1" (o de maior energia somada) e
+ * devolve um offset possivelmente negativo, para o compasso comecar antes do
+ * audio e a contagem ficar certa desde o primeiro clique audivel.
+ */
+function refineGrid(
+  env: Float32Array,
+  onsetRate: number,
+  hintBpm: number,
+  beatsPerBar = 4,
+): { bpm: number; beatOffset: number } {
+  const frames = env.length;
+  if (frames < 32 || !(hintBpm > 0)) return { bpm: hintBpm, beatOffset: 0 };
+
+  const bins = 96;
+  const acc = new Float32Array(bins);
+  const cnt = new Float32Array(bins);
+  const lo = Math.max(40, hintBpm * 0.965);
+  const hi = Math.min(240, hintBpm * 1.035);
+  let bestScore = -Infinity;
+  let bestBpm = hintBpm;
+  let bestPhase = 0;
+
+  for (let bpm = lo; bpm <= hi + 1e-9; bpm += 0.02) {
+    const period = (onsetRate * 60) / bpm;
+    if (period < 2) continue;
+    acc.fill(0);
+    cnt.fill(0);
+    const inc = 1 / period;
+    let phase = 0;
+    for (let i = 0; i < frames; i++) {
+      const bin = Math.min(bins - 1, (phase * bins) | 0);
+      acc[bin] += env[i];
+      cnt[bin] += 1;
+      phase += inc;
+      if (phase >= 1) phase -= 1;
+    }
+    let peak = 0;
+    let peakBin = 0;
+    let total = 0;
+    for (let b = 0; b < bins; b++) {
+      const value = cnt[b] > 0 ? acc[b] / cnt[b] : 0;
+      total += value;
+      if (value > peak) {
+        peak = value;
+        peakBin = b;
+      }
+    }
+    const mean = total / bins;
+    const score = mean > 0 ? peak / mean : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = bpm;
+      bestPhase = ((peakBin + 0.5) / bins) * period;
+    }
+  }
+
+  // Fase fina: soma a energia ao longo da musica toda em cada offset candidato.
+  const period = (onsetRate * 60) / bestBpm;
+  const steps = 200;
+  let bestOff = bestPhase;
+  let bestSum = -1;
+  for (let s = 0; s < steps; s++) {
+    const off = (s / steps) * period;
+    let sum = 0;
+    for (let t = off; t < frames; t += period) {
+      const i = Math.round(t);
+      if (i > 0 && i < frames) sum += env[i];
+    }
+    if (sum > bestSum) {
+      bestSum = sum;
+      bestOff = off;
+    }
+  }
+  // O fluxo espectral sobe quando o ataque entra na janela de Hann, ou seja,
+  // antes do centro dela: compensa meio frame para o clique cair no ataque.
+  bestOff += 0.5;
+
+  // Qual tempo do compasso e o "1": o de maior energia somada.
+  const bar = Math.max(1, Math.round(beatsPerBar));
+  let bestRot = 0;
+  let bestRotScore = -1;
+  for (let r = 0; r < bar; r++) {
+    let sum = 0;
+    for (let k = r; ; k += bar) {
+      const t = bestOff + k * period;
+      if (t >= frames) break;
+      const i = Math.round(t);
+      if (i > 0 && i < frames) sum += env[i];
+    }
+    if (sum > bestRotScore) {
+      bestRotScore = sum;
+      bestRot = r;
+    }
+  }
+
+  const offsetFrames = bestOff + (bestRot - bar) * period;
+  return { bpm: bestBpm, beatOffset: offsetFrames / onsetRate };
+}
+
+function estimateTempo(
+  signal: Float32Array,
+  sampleRate: number,
+): { bpm: number; confidence: number; beatOffset: number } {
   const frameSize = 1024;
   const hop = 512;
   const window = hann(frameSize);
   const frames = Math.max(0, Math.floor((signal.length - frameSize) / hop));
-  if (frames < 8) return { bpm: 0, confidence: 0 };
+  if (frames < 8) return { bpm: 0, confidence: 0, beatOffset: 0 };
 
   const re = new Float32Array(frameSize);
   const im = new Float32Array(frameSize);
@@ -116,7 +236,7 @@ function estimateTempo(signal: Float32Array, sampleRate: number): { bpm: number;
   const onsetRate = sampleRate / hop;
   const minLag = Math.max(2, Math.round((onsetRate * 60) / 200));
   const maxLag = Math.min(frames - 2, Math.round((onsetRate * 60) / 60));
-  if (maxLag <= minLag) return { bpm: 0, confidence: 0 };
+  if (maxLag <= minLag) return { bpm: 0, confidence: 0, beatOffset: 0 };
 
   let bestLag = minLag;
   let bestScore = -Infinity;
@@ -140,8 +260,9 @@ function estimateTempo(signal: Float32Array, sampleRate: number): { bpm: number;
 
   const average = scoreCount > 0 ? scoreSum / scoreCount : 1;
   const confidence = Math.max(0, Math.min(1, average > 0 ? (bestScore - average) / (bestScore + average) : 0));
-  const bpm = Math.round(foldTempo((onsetRate * 60) / bestLag));
-  return { bpm, confidence };
+  const hint = foldTempo((onsetRate * 60) / bestLag);
+  const grid = refineGrid(env, onsetRate, hint, 4);
+  return { bpm: grid.bpm, confidence, beatOffset: grid.beatOffset };
 }
 
 function estimateKey(signal: Float32Array, sampleRate: number): { key: KeyEstimate; chroma: number[] } {
@@ -309,9 +430,9 @@ export function analyzeAudio(
   sampleRate: number,
 ): TrackAnalysis {
   const mono = toMono(left, right);
-  const { bpm, confidence: bpmConfidence } = estimateTempo(mono, sampleRate);
+  const { bpm, confidence: bpmConfidence, beatOffset } = estimateTempo(mono, sampleRate);
   const { key, chroma } = estimateKey(mono, sampleRate);
-  return { bpm, bpmConfidence, key, chroma };
+  return { bpm, bpmConfidence, beatOffset, key, chroma };
 }
 
 export interface ChordSegment {

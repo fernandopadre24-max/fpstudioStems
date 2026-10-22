@@ -663,14 +663,19 @@ export default function App() {
     const active = activeStems?.stems.get(results[0].id);
     const mixerSec = (active ? active.left.length : results[0].left.length) / SAMPLE_RATE;
     const ratio = originalSec > 0 ? mixerSec / originalSec : 1;
+    // Fase medida no audio (onset do bumbo/caixa), nao o offset do score: a
+    // partitura comeca pela primeira nota da melodia, que nem sempre cai no
+    // tempo 1, e era isso que deixava o clique fora da musica. O offset do
+    // score fica so como reserva quando a analise ainda nao chegou.
+    const phase = analysis ? analysis.beatOffset : (score?.offset ?? 0);
     return {
       bpm: baseBpm && ratio > 0 ? baseBpm / ratio : 120,
       beatsPerBar: score?.beatsPerBar ?? 4,
-      // O offset do score e em segundos do tempo original: escala junto.
-      offsetSec: (score?.offset ?? 0) * ratio,
+      // Segundos do tempo original: escala junto com o andamento.
+      offsetSec: phase * ratio,
       durationSec: mixerSec,
     };
-  }, [results, activeStems, baseBpm, score]);
+  }, [results, activeStems, baseBpm, score, analysis]);
 
   const mixerTracks = useMemo<MixerTrack[] | null>(() => {
     if (!results || !metronomeSpec) return null;
@@ -964,8 +969,10 @@ export default function App() {
       const parsed = Number.parseInt(raw, 10);
       if (!Number.isFinite(parsed)) return; // lixo/vazio: mantem o que ja toca
       const clamped = Math.min(bpmMax, Math.max(bpmMin, parsed));
-      // Escrever o BPM detectado e o mesmo que voltar ao original.
-      setTargetBpm(clamped === baseBpm ? null : clamped);
+      // Escrever o BPM detectado e o mesmo que voltar ao original. O BPM agora
+      // vem com fracao (127,63): comparar com meia unidade de folga evita
+      // reprocessar a musica por causa de arredondamento do campo.
+      setTargetBpm(Math.abs(clamped - baseBpm) < 0.5 ? null : clamped);
     },
     [baseBpm, bpmMax, bpmMin],
   );
@@ -976,8 +983,8 @@ export default function App() {
       setTargetBpm((value) => {
         const base = value ?? baseBpm;
         if (!base) return value;
-        const next = Math.min(bpmMax, Math.max(bpmMin, base + delta));
-        return next === baseBpm ? null : next;
+        const next = Math.min(bpmMax, Math.max(bpmMin, Math.round(base + delta)));
+        return Math.abs(next - baseBpm) < 0.5 ? null : next;
       });
     },
     [baseBpm, bpmMax, bpmMin],
@@ -1769,8 +1776,8 @@ export default function App() {
                     >
                       BPM:{" "}
                       {targetBpm !== null && timeRatio !== 1
-                        ? `${Math.round(effectiveBpm)} (de ${analysis.bpm})`
-                        : analysis.bpm}
+                        ? `${Math.round(effectiveBpm)} (de ${Math.round(analysis.bpm)})`
+                        : Math.round(analysis.bpm)}
                     </span>
                   </>
                 ) : null}
@@ -1873,9 +1880,9 @@ export default function App() {
                     </button>
                   )}
                 </div>
-                {baseBpm > 0 && targetBpm !== null && Math.round(targetBpm) !== baseBpm && (
+                {baseBpm > 0 && targetBpm !== null && Math.abs(targetBpm - baseBpm) >= 0.5 && (
                   <span className="file-tone-note">
-                    detectado: {baseBpm} BPM · tom preservado
+                    detectado: {Math.round(baseBpm)} BPM · tom preservado
                   </span>
                 )}
               </div>
@@ -1959,6 +1966,30 @@ export default function App() {
               onActivate={() => setActivePlayback("original")}
               player={musicPlayer}
               onDownload={downloadOriginal}
+              downloadLabel={ext.toUpperCase()}
+            />
+          </section>
+        )}
+
+        {instrumental && instrumentalPeaks && (
+          <section className="panel">
+            <div className="section-head">
+              <h2>Bonus</h2>
+              <p>Instrumental pronto para karaoke (todos os instrumentos, sem os vocais).</p>
+            </div>
+            <PlayerCard
+              title="Instrumental"
+              subtitle={
+                activeMix?.instrumental
+                  ? `Sem vocais — no tom ${tomLabel(semitones)}${bpmLabel}`
+                  : "Sem vocais — ideal para karaoke"
+              }
+              color="#4ade80"
+              peaks={instrumentalPeaks}
+              buffer={activeMix?.instrumental ?? instrumental}
+              active={activePlayback === "instrumental"}
+              onActivate={() => setActivePlayback("instrumental")}
+              onDownload={downloadInstrumental}
               downloadLabel={ext.toUpperCase()}
             />
           </section>
@@ -2535,30 +2566,6 @@ export default function App() {
                 />
               </div>
             )}
-          </section>
-        )}
-
-        {instrumental && instrumentalPeaks && (
-          <section className="panel">
-            <div className="section-head">
-              <h2>Bonus</h2>
-              <p>Instrumental pronto para karaoke (todos os instrumentos, sem os vocais).</p>
-            </div>
-            <PlayerCard
-              title="Instrumental"
-              subtitle={
-                activeMix?.instrumental
-                  ? `Sem vocais — no tom ${tomLabel(semitones)}${bpmLabel}`
-                  : "Sem vocais — ideal para karaoke"
-              }
-              color="#4ade80"
-              peaks={instrumentalPeaks}
-              buffer={activeMix?.instrumental ?? instrumental}
-              active={activePlayback === "instrumental"}
-              onActivate={() => setActivePlayback("instrumental")}
-              onDownload={downloadInstrumental}
-              downloadLabel={ext.toUpperCase()}
-            />
           </section>
         )}
       </main>
