@@ -307,7 +307,7 @@ export function CifraSheet({
           {/* Tone / Key Indicator */}
           <div
             className="cifra-tone-control"
-            title="Tom da música — vale para a cifra e para o áudio (voz e instrumentos; bateria e percussão ficam)"
+            title="Tom da música — vale para a cifra e para o áudio (voz e instrumentos; bateria e ressonância ficam)"
           >
             <span className="cifra-tone-label">Tom:</span>
             <span className="cifra-tone-val">{currentKey}</span>

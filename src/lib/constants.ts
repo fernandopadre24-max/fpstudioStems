@@ -29,25 +29,28 @@ export const STEMS: StemMeta[] = [
   {
     id: "drums",
     label: "Bateria",
-    description: "Kick, caixa e pratos",
+    description: "Os ataques: bumbo, caixa, tons e pratos",
     color: "#ff7a59",
   },
   {
     id: "drumLow",
     label: "Bumbo e caixa",
-    description: "Parte grave da bateria (aproximado)",
+    description: "Só o corpo grave da bateria (experimental)",
     color: "#ef4444",
   },
   {
     id: "drumHigh",
     label: "Pratos e hats",
-    description: "Parte aguda da bateria (aproximado)",
+    description: "Só a parte aguda da bateria (experimental)",
     color: "#fb923c",
   },
   {
+    // ATENCAO: apesar do nome antigo "Percussao", esta trilha NAO sao os
+    // instrumentos de percussao: o HPSS separa a bateria em ataque (fica em
+    // "Bateria") e o que sobra dele (corpo/calda). Este e o lado ressonante.
     id: "percussion",
-    label: "Percussão",
-    description: "Ataques separados da bateria (experimental)",
+    label: "Ressonância",
+    description: "Corpo e cauda dos tambores e pratos, sem os ataques",
     color: "#f5a524",
   },
   {
@@ -82,8 +85,8 @@ export const STEMS: StemMeta[] = [
   },
   {
     id: "otherPerc",
-    label: "Outros (percussivo)",
-    description: "Ataques e percussao dentro dos outros (experimental)",
+    label: "Outros (ataques)",
+    description: "Só os ataques dos outros instrumentos, sem a sustentação (experimental)",
     color: "#c084fc",
   },
   {
@@ -223,7 +226,7 @@ export const STEM_PRESETS: StemPreset[] = [
   {
     id: "8",
     label: "8 trilhas — detalhado",
-    description: "6 instrumentos + percussao da bateria + voz principal e backing.",
+    description: "6 instrumentos + ressonância da bateria + voz principal e backing.",
     model: "htdemucs_6s",
     percussion: true,
     vocals: true,
@@ -236,7 +239,7 @@ export const STEM_PRESETS: StemPreset[] = [
   {
     id: "10",
     label: "10 trilhas — avancado",
-    description: "8 trilhas + sub-baixo + parte percussiva dos outros instrumentos.",
+    description: "8 trilhas + sub-baixo + ataques dos outros instrumentos.",
     model: "htdemucs_6s",
     percussion: true,
     vocals: true,
@@ -261,7 +264,7 @@ export const STEM_PRESETS: StemPreset[] = [
     id: "12",
     label: "12 trilhas — maximo",
     description:
-      "10 trilhas + bumbo/caixa e pratos/hats separados + outros divididos por faixa de frequencia.",
+      "10 trilhas + bumbo/caixa e pratos/hats separados + outros divididos em graves e agudos.",
     model: "htdemucs_6s",
     percussion: true,
     vocals: true,

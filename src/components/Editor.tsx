@@ -19,6 +19,8 @@ export interface EditorTrackMeta {
   id: MixerTrackId;
   label: string;
   color: string;
+  /** Explicacao curta da trilha, mostrada sob o nome. */
+  description?: string;
 }
 
 export interface EditorTrack {
@@ -226,6 +228,11 @@ export function Editor({
                     </button>
                   )}
                 </div>
+                {track.meta.description && (
+                  <p className="lane-sub" title={track.meta.description}>
+                    {track.meta.description}
+                  </p>
+                )}
                 <div className="lane-mix">
                   <button
                     type="button"

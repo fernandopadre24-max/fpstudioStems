@@ -320,6 +320,26 @@ export default function App() {
   const [scoreWarning, setScoreWarning] = useState<string | null>(null);
   const [scoreBase, setScoreBase] = useState<ScoreBase | null>(null);
   const [scoreStep, setScoreStep] = useState("");
+  // Aba recolhivel da partitura: mesmo padrao do "Clonar Voz" (seta no canto).
+  // Comeca ABERTA (e o painel principal do editor); a escolha fica guardada.
+  const [scoreOpen, setScoreOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("fps:partitura-aberta") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleScoreOpen = () => {
+    setScoreOpen((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem("fps:partitura-aberta", next ? "1" : "0");
+      } catch {
+        /* armazenamento indisponivel */
+      }
+      return next;
+    });
+  };
   const [voiceProfileId, setVoiceProfileId] = useState(DEFAULT_VOICE_ID);
   const [voiceIntensity, setVoiceIntensity] = useState(1);
   const [voiceSemitones, setVoiceSemitones] = useState(0);
@@ -1870,7 +1890,7 @@ export default function App() {
             <div className="file-actions">
               <div
                 className="file-tone"
-                title="Troca o tom da música: voz e instrumentos de harmonia sobem ou descem por semitom (a cifra acompanha). Bateria e percussão ficam onde estão."
+                title="Troca o tom da música: voz e instrumentos de harmonia sobem ou descem por semitom (a cifra acompanha). Bateria e ressonância ficam onde estão."
               >
                 <span className="file-tone-label">Tom da música</span>
                 <div className="file-tone-btns">
@@ -2368,6 +2388,15 @@ export default function App() {
               </p>
             )}
 
+            {preset.percussion && (
+              <p className="stem-hint">
+                <span className="stem-hint-tag">Como ler</span>
+                <b>Bateria</b> = os ataques (bumbo, caixa, tons e pratos). <b>Ressonância</b> = o
+                corpo e a cauda que sobra desses ataques — não são instrumentos de percussão
+                extras, é a própria bateria dividida em ataque + ressonância.
+              </p>
+            )}
+
             {phase === "separating" && (
               <div className="progress-block">
                 {modelStatus === "downloading" ? (
@@ -2540,127 +2569,149 @@ export default function App() {
 
         {decoded && (
           <section className="panel score-panel">
-            <div className="section-head">
-              <h2>Partitura</h2>
-              <p>
-                Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
-                cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
-                estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
-                Use o play acima (ou o do editor) para ouvir: a barra mostra a posição da música e
-                deixa pular direto para um ponto, e uma linha marca o compasso que está soando.
-              </p>
-            </div>
-
-            <div className="controls-row">
-              <MusicPlayButton
-                playing={musicPlayer.playing}
-                onToggle={toggleMusic}
-                disabled={!musicBuffer}
-              />
-              {scorePlayer.duration > 0 && <MusicSeekBar player={scorePlayer} />}
-              <label className="field">
-                <span>Voz / instrumento</span>
-                <select
-                  value={scoreSource}
-                  onChange={(event) => setScoreSource(event.target.value)}
-                  disabled={scoreStatus === "working" || scoreSources.length === 0}
-                >
-                  {scoreSources.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void generateScore()}
-                disabled={scoreStatus === "working" || scoreSources.length === 0}
-              >
-                {scoreStatus === "working"
-                  ? "Gerando..."
-                  : scoreNeedsSeparation
-                    ? "Separar e gerar partitura"
-                    : "Gerar partitura"}
-              </button>
-
-              {score && (
-                <>
-                  <button type="button" className="btn btn-ghost" onClick={downloadScoreXml}>
-                    Baixar MusicXML
-                  </button>
-                  <button type="button" className="btn btn-ghost" onClick={downloadScoreMidi}>
-                    Baixar MIDI
-                  </button>
-                </>
-              )}
-            </div>
-
-            {scoreStatus === "working" && scoreStep && (
-              <div className="progress-block">
-                <div className="progress-label">{scoreStep}</div>
-                <div className="bar bar-indeterminate" />
-              </div>
-            )}
-
-            {scoreError && (
-              <div className="score-error" role="alert">
-                {scoreError}
-              </div>
-            )}
-
-            {scoreWarning && (
-              <div className="score-warning" role="status">
-                <p>{scoreWarning}</p>
-                {scoreSource !== "original" && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => {
-                      setScoreSource("original");
-                      void generateScore("original");
-                    }}
-                  >
-                    Ler da música original
-                  </button>
+            <div className="section-head section-head-row voice-head">
+              <div className="voice-head-text">
+                <h2>Partitura</h2>
+                {scoreOpen && (
+                  <p>
+                    Transcreve a melodia de uma trilha para um pentagrama, com a harmonia (cifra) por
+                    cima. Escolha a voz principal ou um instrumento de solo; se a trilha ainda não
+                    estiver separada, a separação roda na hora. Roda inteiramente no seu navegador.
+                    Use o play acima (ou o do editor) para ouvir: a barra mostra a posição da música e
+                    deixa pular direto para um ponto, e uma linha marca o compasso que está soando.
+                  </p>
                 )}
               </div>
-            )}
+              <button
+                type="button"
+                className="btn btn-ghost voice-toggle"
+                onClick={toggleScoreOpen}
+                aria-expanded={scoreOpen}
+                aria-controls="score-body"
+                aria-label={scoreOpen ? "Fechar Partitura" : "Abrir Partitura"}
+                title={scoreOpen ? "Fechar" : "Abrir"}
+              >
+                <span
+                  className={`voice-toggle-arrow${scoreOpen ? " is-open" : ""}`}
+                  aria-hidden="true"
+                >
+                  ▾
+                </span>
+              </button>
+            </div>
 
-            {score && scoreAbc && (
-              <div className="score-result">
-                <div className="score-meta">
-                  <span>
-                    Tonalidade: <b>{score.keyLabel}</b>
-                  </span>
-                  <span>
-                    BPM: <b>{Math.round(score.bpm)}</b>
-                  </span>
-                  <span>
-                    Compasso:{" "}
-                    <b>
-                      {score.beatsPerBar}/{score.beatType}
-                    </b>
-                  </span>
-                  <span>{score.notes.length} notas detectadas</span>
-                </div>
-                <ScoreView
-                  abc={scoreAbc}
-                  color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
-                  playhead={
-                    scorePlayer.playing || scorePlayer.position > 0
-                      ? // A partitura e na linha do tempo original: quando o
-                        // tocador esta no tempo novo, converte de volta.
-                        scorePlayer.position / playedTimeRatio
-                      : null
-                  }
-                  playheadOffset={score.offset}
-                  measureSeconds={score.measureSeconds}
+            <div id="score-body" hidden={!scoreOpen}>
+              <div className="controls-row">
+                <MusicPlayButton
+                  playing={musicPlayer.playing}
+                  onToggle={toggleMusic}
+                  disabled={!musicBuffer}
                 />
+                {scorePlayer.duration > 0 && <MusicSeekBar player={scorePlayer} />}
+                <label className="field">
+                  <span>Voz / instrumento</span>
+                  <select
+                    value={scoreSource}
+                    onChange={(event) => setScoreSource(event.target.value)}
+                    disabled={scoreStatus === "working" || scoreSources.length === 0}
+                  >
+                    {scoreSources.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void generateScore()}
+                  disabled={scoreStatus === "working" || scoreSources.length === 0}
+                >
+                  {scoreStatus === "working"
+                    ? "Gerando..."
+                    : scoreNeedsSeparation
+                      ? "Separar e gerar partitura"
+                      : "Gerar partitura"}
+                </button>
+
+                {score && (
+                  <>
+                    <button type="button" className="btn btn-ghost" onClick={downloadScoreXml}>
+                      Baixar MusicXML
+                    </button>
+                    <button type="button" className="btn btn-ghost" onClick={downloadScoreMidi}>
+                      Baixar MIDI
+                    </button>
+                  </>
+                )}
               </div>
-            )}
+
+              {scoreStatus === "working" && scoreStep && (
+                <div className="progress-block">
+                  <div className="progress-label">{scoreStep}</div>
+                  <div className="bar bar-indeterminate" />
+                </div>
+              )}
+
+              {scoreError && (
+                <div className="score-error" role="alert">
+                  {scoreError}
+                </div>
+              )}
+
+              {scoreWarning && (
+                <div className="score-warning" role="status">
+                  <p>{scoreWarning}</p>
+                  {scoreSource !== "original" && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setScoreSource("original");
+                        void generateScore("original");
+                      }}
+                    >
+                      Ler da música original
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {score && scoreAbc && (
+                <div className="score-result">
+                  <div className="score-meta">
+                    <span>
+                      Tonalidade: <b>{score.keyLabel}</b>
+                    </span>
+                    <span>
+                      BPM: <b>{Math.round(score.bpm)}</b>
+                    </span>
+                    <span>
+                      Compasso:{" "}
+                      <b>
+                        {score.beatsPerBar}/{score.beatType}
+                      </b>
+                    </span>
+                    <span>{score.notes.length} notas detectadas</span>
+                  </div>
+                  <ScoreView
+                    abc={scoreAbc}
+                    color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
+                    playhead={
+                      scorePlayer.playing || scorePlayer.position > 0
+                        ? // A partitura e na linha do tempo original: quando o
+                          // tocador esta no tempo novo, converte de volta.
+                          scorePlayer.position / playedTimeRatio
+                        : null
+                    }
+                    playheadOffset={score.offset}
+                    measureSeconds={score.measureSeconds}
+                  />
+                </div>
+              )}
+            </div>
           </section>
         )}
       </main>

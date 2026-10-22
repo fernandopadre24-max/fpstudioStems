@@ -152,7 +152,7 @@ function refineGrid(
   }
 
   // Fase fina: soma a energia ao longo da musica toda em cada offset candidato.
-  const period = (onsetRate * 60) / bestBpm;
+  let period = (onsetRate * 60) / bestBpm;
   const steps = 200;
   let bestOff = bestPhase;
   let bestSum = -1;
@@ -168,9 +168,67 @@ function refineGrid(
       bestOff = off;
     }
   }
-  // O fluxo espectral sobe quando o ataque entra na janela de Hann, ou seja,
-  // antes do centro dela: compensa meio frame para o clique cair no ataque.
-  bestOff += 0.5;
+
+  // 2b. Refino por minimos quadrados nos ataques.
+  //
+  // O comb tem a resolucao de um quadro (11,6 ms a 44,1 kHz) e, pior, aceita
+  // qualquer BPM dentro de 3,5% do palpite: numa musica de 4 minutos um erro
+  // de 0,1% no andamento ja desloca a grade ~0,36 s do comeco ao fim. Era o
+  // "metronomo um pouco fora" — o clique comecava junto e ia atrasando.
+  // Ajustar uma reta nos ataques detectados (tempo do ataque x numero do
+  // tempo) entrega o periodo com fracao de BPM e a fase em sub-quadro.
+  let maxEnv = 0;
+  for (let i = 0; i < frames; i++) if (env[i] > maxEnv) maxEnv = env[i];
+  const peakLimit = Math.max(0.1, maxEnv * 0.25);
+  const peaks: number[] = [];
+  for (let i = 1; i < frames - 1; i++) {
+    if (env[i] < env[i - 1] || env[i] <= env[i + 1] || env[i] < peakLimit) continue;
+    // Interpolacao parabolica: o pico real cai entre dois quadros.
+    const a = env[i - 1];
+    const b = env[i];
+    const c = env[i + 1];
+    const denom = a - 2 * b + c;
+    const delta = denom !== 0 ? (0.5 * (a - c)) / denom : 0;
+    peaks.push(i + Math.max(-0.5, Math.min(0.5, delta)));
+  }
+
+  let phase = bestOff;
+  const hintPeriod = (onsetRate * 60) / hintBpm;
+  for (let round = 0; round < 3 && peaks.length >= 8; round++) {
+    let sumK = 0;
+    let sumX = 0;
+    let sumKK = 0;
+    let sumKX = 0;
+    let count = 0;
+    for (const peak of peaks) {
+      const k = Math.round((peak - phase) / period);
+      const predicted = phase + k * period;
+      // Meio tempo fora = subdivisao (colcheia, tercina): nao entra na reta.
+      if (Math.abs(peak - predicted) > period * 0.25) continue;
+      sumK += k;
+      sumX += peak;
+      sumKK += k * k;
+      sumKX += k * peak;
+      count++;
+    }
+    if (count < 8) break;
+    const denominator = count * sumKK - sumK * sumK;
+    if (Math.abs(denominator) < 1e-6) break;
+    const slope = (count * sumKX - sumK * sumX) / denominator;
+    const intercept = (sumX - slope * sumK) / count;
+    // Sanidade: o refino so pode mexer alguns por cento no andamento. Assim
+    // ele nunca "trava" no dobro/metade nem numa subdivisao.
+    if (!(slope > hintPeriod * 0.93) || !(slope < hintPeriod * 1.07)) break;
+    period = slope;
+    phase = intercept;
+    bestBpm = (onsetRate * 60) / period;
+  }
+
+  // O fluxo espectral atinge o maximo quando o ataque termina de entrar na
+  // janela: o pico cai ~1 quadro (hop) ANTES do ataque de verdade. Somar 1
+  // quadro poe o clique exatamente no transiente (medido no bumbo: 0,500 s
+  // de ataque -> pico em 0,488 s).
+  phase += 1;
 
   // Qual tempo do compasso e o "1": o de maior energia somada.
   const bar = Math.max(1, Math.round(beatsPerBar));
@@ -179,7 +237,7 @@ function refineGrid(
   for (let r = 0; r < bar; r++) {
     let sum = 0;
     for (let k = r; ; k += bar) {
-      const t = bestOff + k * period;
+      const t = phase + k * period;
       if (t >= frames) break;
       const i = Math.round(t);
       if (i > 0 && i < frames) sum += env[i];
@@ -190,7 +248,7 @@ function refineGrid(
     }
   }
 
-  const offsetFrames = bestOff + (bestRot - bar) * period;
+  const offsetFrames = phase + (bestRot - bar) * period;
   return { bpm: bestBpm, beatOffset: offsetFrames / onsetRate };
 }
 
