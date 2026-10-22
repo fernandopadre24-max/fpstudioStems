@@ -11,6 +11,15 @@ import { sendJson } from "./http.js";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isWindows = process.platform === "win32";
 
+// A Vercel mata a funcao aos 60s: o cliente recebe um 504 sem corpo e o app so
+// mostra "Erro 504.". Trabalhamos com um orcamento menor e sempre devolvemos um
+// JSON explicando o que houve (bloqueio de IP) antes de estourar o limite.
+const FUNCTION_BUDGET_MS = 50_000;
+// As instancias Invidious estao praticamente mortas: elas ganham um orcamento
+// curto para nao consumirem o tempo que o yt-dlp precisa.
+const INVIDIOUS_BUDGET_MS = 10_000;
+const remainingMs = (deadline: number): number => Math.max(0, deadline - Date.now());
+
 function releaseAsset(platform: string): string {
   if (platform === "win32") return "yt-dlp.exe";
   if (platform === "linux") return "yt-dlp_linux";
@@ -270,11 +279,26 @@ interface RawEntry {
   thumbnails?: { url?: string }[];
 }
 
-function collectOutput(executable: string, args: string[]): Promise<string> {
+function collectOutput(
+  executable: string,
+  args: string[],
+  timeoutMs = 25_000,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true, env: childEnv });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = (run: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      run();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(() => reject(new Error(`yt-dlp passou de ${Math.round(timeoutMs / 1000)}s.`)));
+    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
       if (stdout.length > 24_000_000) child.kill();
@@ -282,10 +306,12 @@ function collectOutput(executable: string, args: string[]): Promise<string> {
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.on("error", reject);
+    child.on("error", (cause) => finish(() => reject(cause)));
     child.on("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(stderr.trim() || `yt-dlp terminou com codigo ${code}`));
+      finish(() => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.trim() || `yt-dlp terminou com codigo ${code}`));
+      });
     });
   });
 }
@@ -540,7 +566,7 @@ async function invidiousJson<T>(base: string, pathAndQuery: string): Promise<T |
     const response = await fetch(url, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(6_000),
     });
     if (response.status === 200) {
       const contentType = response.headers.get("content-type") ?? "";
@@ -601,7 +627,7 @@ async function fetchInvidiousStream(base: string, audioUrl: string): Promise<Res
     const audioResponse = await fetch(current, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(12_000),
     });
 
     if (audioResponse.status === 200 || audioResponse.status === 206) {
@@ -660,41 +686,37 @@ async function tryInvidiousInstance(
     : { response: null, note: `${proxied ? "proxy" : "direto"}-stream-falhou` };
 }
 
-async function openInvidiousAudio(id: string): Promise<Response> {
+async function openInvidiousAudio(id: string, deadline: number): Promise<Response> {
   const failures: string[] = [];
   const all = await getInvidiousInstanceList();
-  // So tentamos as primeiras (conhecidas) para nao estourar o tempo da funcao.
-  const instances = all.slice(0, 12);
-  const deadline = Date.now() + 45_000;
-  // A instancia que funciona (f5.si) tem um "companion" que oscila por alguns
-  // segundos; damos uma segunda passada antes de desistir.
-  for (let pass = 0; pass < 2; pass += 1) {
-    for (const base of instances) {
-      if (Date.now() > deadline) break;
-      const host = base.replace(/^https?:\/\//, "");
-      try {
-        // Proxiado pela instancia (local=true): e o caminho confiavel no Vercel,
-        // pois os bytes vem da instancia (o googlevideo estrangula datacenter).
-        const proxied = await tryInvidiousInstance(base, id, true);
-        if (proxied.response) {
-          lastGoodInstance = base;
-          return proxied.response;
-        }
+  // Poucas instancias, uma passada: o orcamento e curto de proposito (elas
+  // estao quase todas fora do ar e cada tentativa custa segundos).
+  const instances = all.slice(0, 6);
+  for (const base of instances) {
+    if (remainingMs(deadline) < 3_500) break;
+    const host = base.replace(/^https?:\/\//, "");
+    try {
+      // Proxiado pela instancia (local=true): e o caminho confiavel no Vercel,
+      // pois os bytes vem da instancia (o googlevideo estrangula datacenter).
+      const proxied = await tryInvidiousInstance(base, id, true);
+      if (proxied.response) {
+        lastGoodInstance = base;
+        return proxied.response;
+      }
 
-        // Fallback: URL direta do googlevideo (local=false) — melhor em IP residencial.
+      // Fallback: URL direta do googlevideo (local=false) — melhor em IP residencial.
+      if (remainingMs(deadline) > 3_500) {
         const direct = await tryInvidiousInstance(base, id, false);
         if (direct.response) {
           lastGoodInstance = base;
           return direct.response;
         }
-
         failures.push(`${host}:${proxied.note}/${direct.note}`);
-      } catch (cause) {
-        failures.push(`${host}:${cause instanceof Error ? cause.message.slice(0, 40) : "erro"}`);
+      } else {
+        failures.push(`${host}:${proxied.note}`);
       }
-    }
-    if (pass === 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
+    } catch (cause) {
+      failures.push(`${host}:${cause instanceof Error ? cause.message.slice(0, 40) : "erro"}`);
     }
   }
   throw new Error(`invidious[${failures.slice(0, 10).join(" ")}]`);
@@ -704,9 +726,10 @@ async function streamInvidiousAudio(
   id: string,
   response: ServerResponse,
   errors: string[] = [],
+  deadline = Date.now() + INVIDIOUS_BUDGET_MS,
 ): Promise<boolean> {
   try {
-    const audioResponse = await openInvidiousAudio(id);
+    const audioResponse = await openInvidiousAudio(id, deadline);
     response.statusCode = audioResponse.status;
     response.setHeader(
       "Content-Type",
@@ -737,29 +760,37 @@ export async function streamYouTubeAudio(
   playerClient?: string,
   noCookies = false,
 ): Promise<void> {
+  const deadline = Date.now() + FUNCTION_BUDGET_MS;
   const errors: string[] = [];
   await ensureCookies();
   errors.push(cookieStatus());
   errors.push(proxyStatus());
   // No Vercel o yt-dlp e bloqueado pelo bot-check (IP de datacenter), entao a
-  // instancia Invidious vem primeiro. No modo local (ou com proxy residencial)
-  // o yt-dlp e direto e mais rapido, entao ele vem primeiro.
+  // instancia Invidious vem primeiro — mas com orcamento curto, porque hoje
+  // quase todas estao fora do ar e o tempo e o que falta para o yt-dlp. No modo
+  // local (ou com proxy residencial) o yt-dlp e direto e mais rapido.
   const preferInvidious = Boolean(process.env.VERCEL) && !ytProxy && !playerClient;
   if (preferInvidious) {
-    if (await streamInvidiousAudio(id, response, errors)) return;
-    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies)) return;
+    const invidiousDeadline = Math.min(deadline, Date.now() + INVIDIOUS_BUDGET_MS);
+    if (await streamInvidiousAudio(id, response, errors, invidiousDeadline)) return;
+    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies, deadline)) return;
   } else {
-    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies)) return;
-    if (await streamInvidiousAudio(id, response, errors)) return;
+    if (await streamYtDlpAudio(id, response, errors, playerClient, noCookies, deadline)) return;
+    if (remainingMs(deadline) > 4_000) {
+      if (await streamInvidiousAudio(id, response, errors, deadline)) return;
+    }
   }
   const joinedErrors = errors.join(" ");
-  // O cookie de login do YouTube esta valido (o resumo mostra os 10/10), mas o
-  // YouTube recusa o IP de datacenter da Vercel. Reexportar cookie nao resolve;
-  // a saida e um proxy residencial ou o modo local/tunel.
+  // O YouTube recusa o IP de datacenter da Vercel ("Sign in to confirm you're
+  // not a bot"). Reexportar cookie nao resolve; a saida e um proxy residencial
+  // ou o modo local/tunel.
   const ipBlocked = /not a bot|Sign in to confirm|no longer valid|rotated/i.test(joinedErrors);
+  const exhausted = remainingMs(deadline) < 1_000;
   const blockHint = ipBlocked
-    ? " O cookie de login esta valido: o bloqueio e pelo IP do servidor (Vercel). Use o modo local/tunel ou configure um proxy residencial (YTDLP_PROXY) no servidor."
-    : "";
+    ? " Use o modo local/tunel ou configure um proxy residencial (YTDLP_PROXY) no servidor."
+    : exhausted
+      ? " O tempo do servidor (60s) acabou antes de o audio comecar a tocar; tente de novo."
+      : "";
   const cookieEntry = errors.find((entry) => entry.startsWith("cookies:"));
   const proxyEntry = errors.find((entry) => entry.startsWith("proxy:"));
   const ytEntries = errors.filter((entry) => entry.startsWith("yt-dlp")).slice(-2);
@@ -767,44 +798,17 @@ export async function streamYouTubeAudio(
     Boolean(entry),
   );
   sendJson(response, 502, {
+    code: ipBlocked ? "ip_blocked" : "download_failed",
     error:
-      "O YouTube bloqueou o download pelo servidor online. O cookie de login esta valido; o bloqueio e pelo IP de datacenter da Vercel." +
-      blockHint,
+      (ipBlocked
+        ? "O YouTube bloqueou o download pelo servidor online: o IP de datacenter da Vercel e recusado pelo YouTube."
+        : "Nao foi possivel baixar o audio do YouTube pelo servidor.") + blockHint,
     ...(detail.length ? { detail: detail.join(" | ") } : {}),
   });
 }
 
-async function probeYtDlpSize(
-  executable: string,
-  cookies: string[],
-  id: string,
-  playerClient?: string,
-): Promise<number | null> {
-  const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
-  try {
-    const pot = await potArgs();
-    const output = await collectOutput(executable, [
-      "-f",
-      "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-      "--no-warnings",
-      "--print",
-      "%(filesize,filesize_approx)s",
-      ...runtimeArgs(),
-      ...clientArgs(playerClient),
-      ...pot,
-      ...proxyArgs(),
-      ...cookies,
-      watchUrl,
-    ]);
-    const size = Number.parseInt(output.trim(), 10);
-    return Number.isFinite(size) && size > 0 ? size : null;
-  } catch {
-    return null;
-  }
-}
-
 // Clientes do YouTube que ainda entregam URLs de formato diretas. Os demais
-// (web, visionos, ios, android_vr...) caem em SABR: vêm formatos sem URL.
+// (web, visionos, android_vr...) caem em SABR: vêm formatos sem URL.
 const defaultPlayerClients = "android,ios,mweb,web_safari,tv_embedded";
 
 function clientArgs(playerClient?: string): string[] {
@@ -873,12 +877,33 @@ function runYtDlpAttempt(
   executable: string,
   args: string[],
   response: ServerResponse,
-  totalSize: number | null,
+  waitMs: number,
 ): Promise<YtDlpAttempt> {
   return new Promise((resolve) => {
     const child = spawn(executable, args, { windowsHide: true, env: childEnv });
     let started = false;
     let stderr = "";
+    let settled = false;
+    const finish = (result: YtDlpAttempt) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    // Sem bytes ate o prazo: o yt-dlp esta preso no desafio do YouTube. Se ja
+    // comecou a tocar, encerra limpo (o Vercel mataria a funcao do mesmo jeito).
+    const timer = setTimeout(() => {
+      child.kill();
+      if (started) {
+        response.end();
+        finish({ ok: true, stderr });
+      } else {
+        finish({
+          ok: false,
+          stderr: `${stderr} tempo esgotado (${Math.round(waitMs / 1000)}s sem audio)`.trim(),
+        });
+      }
+    }, waitMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
       if (!started) {
@@ -887,7 +912,6 @@ function runYtDlpAttempt(
         response.setHeader("Content-Type", "audio/webm");
         response.setHeader("X-Stem-Source", "yt-dlp");
         response.setHeader("Cache-Control", "no-store");
-        if (totalSize) response.setHeader("Content-Length", String(totalSize));
       }
       response.write(chunk);
     });
@@ -900,18 +924,18 @@ function runYtDlpAttempt(
     child.on("error", (cause) => {
       if (started) {
         response.end();
-        resolve({ ok: true, stderr });
+        finish({ ok: true, stderr });
       } else {
-        resolve({ ok: false, stderr: `${stderr} ${cause.message}`.trim() });
+        finish({ ok: false, stderr: `${stderr} ${cause.message}`.trim() });
       }
     });
 
     child.on("close", () => {
       if (started) {
         response.end();
-        resolve({ ok: true, stderr });
+        finish({ ok: true, stderr });
       } else {
-        resolve({ ok: false, stderr });
+        finish({ ok: false, stderr });
       }
     });
 
@@ -938,6 +962,7 @@ async function streamYtDlpAudio(
   errors: string[] = [],
   playerClient?: string,
   noCookies = false,
+  deadline = Date.now() + FUNCTION_BUDGET_MS,
 ): Promise<boolean> {
   let executable: string;
   try {
@@ -948,7 +973,6 @@ async function streamYtDlpAudio(
   }
   const cookies = noCookies ? [] : await cookieArgs();
   const pot = await potArgs();
-  const totalSize = await probeYtDlpSize(executable, cookies, id, playerClient);
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
   const prefix = [
     "-f",
@@ -958,18 +982,18 @@ async function streamYtDlpAudio(
     "--no-playlist",
     "--no-warnings",
     "--no-part",
+    "--socket-timeout",
+    "10",
     ...runtimeArgs(),
     ...clientArgs(playerClient),
     ...pot,
     ...proxyArgs(),
   ];
 
-  const first = await runYtDlpAttempt(
-    executable,
-    [...prefix, ...cookies, watchUrl],
-    response,
-    totalSize,
-  );
+  // Prazo para o yt-dlp comecar a tocar: o que sobrar do orcamento da funcao,
+  // com uma folga para escrever a resposta caso ele falhe.
+  const waitMs = Math.max(8_000, Math.min(38_000, remainingMs(deadline) - 6_000));
+  const first = await runYtDlpAttempt(executable, [...prefix, ...cookies, watchUrl], response, waitMs);
   if (first.ok) return true;
   errors.push(`yt-dlp${cookies.length ? " (cookies)" : ""}: ${stderrTail(first.stderr)}`);
 
@@ -977,7 +1001,8 @@ async function streamYtDlpAudio(
   // suspeita e pede login. Se o erro foi esse, tenta de novo sem cookies,
   // apoiado so no PO token. Se o primeiro teste ja foi sem cookies, nao repete.
   if (cookies.length && /sign in to confirm|not a bot/i.test(first.stderr)) {
-    const second = await runYtDlpAttempt(executable, [...prefix, watchUrl], response, totalSize);
+    const rest = Math.max(6_000, Math.min(20_000, remainingMs(deadline) - 5_000));
+    const second = await runYtDlpAttempt(executable, [...prefix, watchUrl], response, rest);
     if (second.ok) return true;
     errors.push(`yt-dlp (sem cookies): ${stderrTail(second.stderr)}`);
   }

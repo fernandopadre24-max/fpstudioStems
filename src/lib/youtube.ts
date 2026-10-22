@@ -15,17 +15,28 @@ export interface YtDlpStatus {
   enabled?: boolean;
 }
 
-async function describeError(response: Response): Promise<string> {
+/** Erro definitivo: repetir nao muda o resultado (YouTube recusou o IP do servidor). */
+export class YouTubeBlockedError extends Error {}
+
+interface ApiError {
+  message: string;
+  code: string | null;
+}
+
+async function readError(response: Response): Promise<ApiError> {
   if (response.status === 404) {
-    return "O buscador do YouTube nao esta disponivel nesta publicacao.";
+    return { message: "O buscador do YouTube nao esta disponivel nesta publicacao.", code: null };
   }
   try {
-    const data = (await response.json()) as { error?: string };
-    if (data.error) return data.error;
+    const data = (await response.json()) as { error?: string; code?: string };
+    if (data.error) return { message: data.error, code: data.code ?? null };
   } catch {
-    /* corpo nao era JSON */
+    /* corpo nao era JSON (ex.: 504 em HTML) */
   }
-  return `Erro ${response.status}.`;
+  if (response.status === 504) {
+    return { message: "O servidor demorou demais para responder (504). Tente de novo.", code: "timeout" };
+  }
+  return { message: `Erro ${response.status}.`, code: null };
 }
 
 export function youTubeIdFromUrl(value: string): string | null {
@@ -38,13 +49,13 @@ export function youTubeIdFromUrl(value: string): string | null {
 export async function getYtDlpStatus(prepare = false): Promise<YtDlpStatus> {
   const query = prepare ? "?prepare=1" : "";
   const response = await fetch(`/api/youtube/status${query}`);
-  if (!response.ok) throw new Error(await describeError(response));
+  if (!response.ok) throw new Error((await readError(response)).message);
   return (await response.json()) as YtDlpStatus;
 }
 
 export async function searchYouTube(query: string): Promise<YouTubeResult[]> {
   const response = await fetch(`/api/youtube/search?q=${encodeURIComponent(query)}`);
-  if (!response.ok) throw new Error(await describeError(response));
+  if (!response.ok) throw new Error((await readError(response)).message);
   const data = (await response.json()) as { results: YouTubeResult[] };
   return data.results;
 }
@@ -60,18 +71,18 @@ export async function downloadYouTubeAudio(
   onProgress?: (progress: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<File> {
-  // No modo publico o audio vem de uma instancia Invidious que oscila; tentamos
-  // algumas vezes antes de desistir, para o usuario nao precisar clicar de novo.
+  // No modo publico o caminho de audio oscila (instancias/yt-dlp); tentamos de
+  // novo algumas vezes. Bloqueio de IP e definitivo: nao insiste.
   const attempts = 3;
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await downloadYouTubeAudioOnce(id, title, onProgress, signal);
     } catch (cause) {
-      if (signal?.aborted) throw cause;
+      if (signal?.aborted || cause instanceof YouTubeBlockedError) throw cause;
       lastError = cause;
       if (attempt < attempts) {
-        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+        await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
       }
     }
   }
@@ -85,8 +96,11 @@ async function downloadYouTubeAudioOnce(
   signal?: AbortSignal,
 ): Promise<File> {
   const response = await fetch(`/api/youtube/audio?id=${encodeURIComponent(id)}`, { signal });
-  console.log('[downloadYouTubeAudio] Response status:', response.status, response.ok);
-  if (!response.ok) throw new Error(await describeError(response));
+  if (!response.ok) {
+    const failure = await readError(response);
+    if (failure.code === "ip_blocked") throw new YouTubeBlockedError(failure.message);
+    throw new Error(failure.message);
+  }
 
   const contentType = response.headers.get("content-type")?.split(";")[0] ?? "audio/webm";
   const lengthHeader = response.headers.get("content-length");
@@ -98,7 +112,6 @@ async function downloadYouTubeAudioOnce(
 
   if (!response.body) {
     const blob = await response.blob();
-    console.log('[downloadYouTubeAudio] Got blob:', blob.size, blob.type);
     if (blob.size === 0) throw new Error("O YouTube nao retornou audio.");
     onProgress?.({ loaded: blob.size, total: blob.size });
     return new File([blob], filename, { type: contentType });
@@ -120,7 +133,6 @@ async function downloadYouTubeAudioOnce(
   }
 
   if (loaded === 0) throw new Error("O YouTube nao retornou audio.");
-  console.log('[downloadYouTubeAudio] Download complete, total bytes:', loaded);
   onProgress?.({ loaded, total: knownTotal ?? loaded });
   return new File(chunks, filename, { type: contentType });
 }
