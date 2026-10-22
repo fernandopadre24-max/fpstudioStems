@@ -161,8 +161,12 @@ export function VoiceCard({
           onClick={toggleOpen}
           aria-expanded={open}
           aria-controls="voice-body"
+          aria-label={open ? "Fechar Clonar Voz" : "Abrir Clonar Voz"}
+          title={open ? "Fechar" : "Abrir"}
         >
-          {open ? "Fechar" : "Abrir"}
+          <span className={`voice-toggle-arrow${open ? " is-open" : ""}`} aria-hidden="true">
+            ▾
+          </span>
         </button>
       </div>
 
