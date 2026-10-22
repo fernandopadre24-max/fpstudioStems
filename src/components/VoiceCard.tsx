@@ -93,13 +93,13 @@ export function VoiceCard({
   const busy = status === "working";
 
   // Aba recolhivel: a galeria de vozes e alta e empurrava o resto da pagina
-  // para baixo. A escolha fica guardada, entao quem fechou nao precisa fechar
-  // de novo a cada musica.
+  // para baixo. Comeca FECHADA (abre so quando a pessoa quiser clonar) e a
+  // escolha fica guardada, entao quem abriu nao precisa abrir de novo.
   const [open, setOpen] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem(VOICE_OPEN_KEY) !== "0";
+      return window.localStorage.getItem(VOICE_OPEN_KEY) === "1";
     } catch {
-      return true;
+      return false;
     }
   });
   const toggleOpen = () => {
@@ -146,12 +146,15 @@ export function VoiceCard({
     <section className="panel voice-panel">
       <div className="section-head section-head-row voice-head">
         <div className="voice-head-text">
-          <h2>Clonar Voz</h2>
+          <h2>
+            Clonar Voz
+            <span className="voice-tag">em fase experimental</span>
+          </h2>
           {open && (
             <p>
               Escolha um tipo de voz por estilo musical: o app mede a voz da musica e troca o timbre
               (tom, formantes, brilho, vibrato) da voz principal. Roda no seu navegador, sem baixar
-              modelo extra.
+              modelo extra. Recurso em fase experimental: o resultado varia conforme a gravacao.
             </p>
           )}
         </div>

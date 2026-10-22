@@ -67,6 +67,7 @@ import { buildMidi } from "./lib/midi";
 import { buildMusicXml } from "./lib/musicxml";
 import type { WorkerResponse } from "./lib/protocol";
 import { assessReading, buildAbc, buildScore, type Score } from "./lib/score";
+import { analyzeStemHint } from "./lib/stemHint";
 import { SeparationEngine } from "./lib/separationClient";
 import {
   isPercussionStem,
@@ -254,6 +255,25 @@ export default function App() {
   const [separationProgress, setSeparationProgress] = useState<SeparationProgress | null>(null);
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
   const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
+  // Sugestao de quantas trilhas separar, medida no proprio audio (lib/stemHint).
+  const [presetTouched, setPresetTouched] = useState(false);
+  const stemHint = useMemo(() => {
+    if (!decoded) return null;
+    try {
+      return analyzeStemHint(decoded.left, decoded.right, SAMPLE_RATE);
+    } catch {
+      return null;
+    }
+  }, [decoded]);
+  // Musica nova: a sugestao volta a valer. Quem escolhe na mao continua com a
+  // escolha ate trocar de musica.
+  useEffect(() => {
+    setPresetTouched(false);
+  }, [decoded]);
+  useEffect(() => {
+    if (!stemHint || presetTouched) return;
+    setPresetChoice(stemHint.preset);
+  }, [stemHint, presetTouched]);
   const [separationNote, setSeparationNote] = useState<string | null>(null);
   const [activePlayback, setActivePlayback] = useState<
     "mixer" | "original" | "instrumental" | "voicePreview" | "voiceDemo" | null
@@ -2279,7 +2299,10 @@ export default function App() {
                 <span>Trilhas</span>
                 <select
                   value={presetChoice}
-                  onChange={(event) => setPresetChoice(event.target.value as StemPresetId)}
+                  onChange={(event) => {
+                    setPresetTouched(true);
+                    setPresetChoice(event.target.value as StemPresetId);
+                  }}
                   disabled={phase === "separating"}
                 >
                   {STEM_PRESETS.map((option) => (
@@ -2336,6 +2359,14 @@ export default function App() {
                 </span>
               )}
             </div>
+
+            {stemHint && (
+              <p className="stem-hint">
+                <span className="stem-hint-tag">Sugestão</span>
+                {stemHint.count} trilhas para esta música — {stemHint.reason}.
+                {presetChoice !== stemHint.preset && " Você escolheu outra quantidade."}
+              </p>
+            )}
 
             {phase === "separating" && (
               <div className="progress-block">
