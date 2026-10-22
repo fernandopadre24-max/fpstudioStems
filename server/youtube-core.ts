@@ -894,11 +894,15 @@ function proxyStatus(): string {
   return `proxy:sim (${masked})`;
 }
 
-// O download fica habilitado por padrao. No modo publico (Vercel) o audio vem
-// da instancia Invidious (que passa pelo bloqueio de datacenter); no modo local
-// vem direto do yt-dlp. YOUTUBE_ENABLED=0 desliga (kill switch).
+// O download fica habilitado por padrao. No modo local vem direto do yt-dlp.
+// No link publico (Vercel) o YouTube recusa o IP de datacenter mesmo com cookies
+// e PO token validos: em vez de mostrar uma busca que quase sempre falha, o app
+// esconde o cartao e pede o arquivo. Se um dia houver proxy residencial
+// (YTDLP_PROXY), o recurso volta sozinho. YOUTUBE_ENABLED=0 desliga de vez.
 export function youtubeEnabled(): boolean {
-  return process.env.YOUTUBE_ENABLED?.trim() !== "0";
+  if (process.env.YOUTUBE_ENABLED?.trim() === "0") return false;
+  if (process.env.VERCEL && !getProxy()) return false;
+  return true;
 }
 
 interface YtDlpAttempt {

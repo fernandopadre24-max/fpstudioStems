@@ -217,7 +217,11 @@ export default function App() {
   const [decoded, setDecoded] = useState<DecodedAudio | null>(null);
   // No link publico (Vercel) o download do YouTube fica desativado; no modo
   // local funciona. Comeca "true" para nao piscar no modo local.
-  const [youtubeEnabled, setYoutubeEnabled] = useState(true);
+  const [youtubeEnabled, setYoutubeEnabled] = useState(
+    // No link publico (Vercel) a busca nao aparece. O servidor confirma isso em
+    // /api/youtube/status; decidir aqui tambem evita o cartao "piscar" ao abrir.
+    () => typeof location === "undefined" || !/(^|\.)vercel\.app$/i.test(location.hostname),
+  );
   const [originalPeaks, setOriginalPeaks] = useState<Float32Array | null>(null);
   const [originalBuffer, setOriginalBuffer] = useState<AudioBuffer | null>(null);
   const [instrumental, setInstrumental] = useState<AudioBuffer | null>(null);
@@ -1721,8 +1725,8 @@ export default function App() {
                   </p>
                 </div>
                 <p className="source-note">
-                  O download direto do YouTube esta disponivel apenas no modo local (no seu
-                  computador). Envie um arquivo MP3, WAV, M4A, OGG ou FLAC — funciona igual.
+                  Aceita MP3, WAV, M4A, OGG e FLAC. O arquivo nao sai do seu computador: a separacao
+                  acontece aqui no navegador.
                 </p>
               </section>
             )}
