@@ -42,14 +42,7 @@ import {
   type StemId,
   type StemPresetId,
 } from "./lib/constants";
-import {
-  createZip,
-  downloadBlob,
-  downloadSequentially,
-  sanitizeBaseName,
-  totalSize,
-  type ZipEntry,
-} from "./lib/download";
+import { createZipWriter, downloadBlob, sanitizeBaseName } from "./lib/download";
 import { getYtDlpStatus } from "./lib/youtube";
 import {
   buildChordChart,
@@ -279,6 +272,7 @@ export default function App() {
     "mixer" | "original" | "instrumental" | "voicePreview" | "voiceDemo" | null
   >(null);
   const [zipState, setZipState] = useState<"idle" | "working">("idle");
+  const [zipBytes, setZipBytes] = useState(0);
   const [gpuBlocked, setGpuBlocked] = useState<boolean>(readGpuBlocked);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [exportFormat, setExportFormat] = useState<AudioFormat>("wav");
@@ -1649,72 +1643,73 @@ export default function App() {
 
   const downloadAll = useCallback(async () => {
     if (!results) return;
-    const entries: ZipEntry[] = [];
-    for (const stem of results) {
-      const meta = STEMS.find((item) => item.id === stem.id);
-      if (!meta) continue;
-      const audio = activeStems?.stems.get(stem.id) ?? stem;
-      // Percussao nao muda de tom (mas acompanha o andamento quando mudou).
-      const tom = fileMarks(Boolean(activeStems?.stems.has(stem.id)), !isPercussionStem(stem.id));
-      entries.push({
-        name: `${baseName} - ${meta.label}${corte}${tom}.${ext}`,
-        blob: encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples }),
-      });
-    }
-    const voice = activeVoice ?? voiceResult;
-    if (voice) {
-      const tom = fileMarks(Boolean(activeVoice));
-      entries.push({
-        name: `${baseName} - Voz transformada${corte}${tom}.${ext}`,
-        blob: encodeAudio(voice.left, voice.right, exportFormat, {
-          range: rangeSamples,
-        }),
-      });
-    }
-    const mix = activeMix?.instrumental ?? instrumental;
-    if (mix) {
-      const tom = fileMarks(Boolean(activeMix?.instrumental));
-      entries.push({
-        name: `${baseName} - Instrumental${corte}${tom}.${ext}`,
-        blob: encodeAudio(
-          mix.getChannelData(0),
-          mix.getChannelData(1),
-          exportFormat,
-          { range: rangeSamples },
-        ),
-      });
-    }
-    if (lyricsText) {
-      entries.push({
-        name: `${baseName} - letra.txt`,
-        blob: new Blob([lyricsText], { type: "text/plain;charset=utf-8" }),
-      });
-    }
-    if (lyricsLrc) {
-      entries.push({
-        name: `${baseName} - letra.lrc`,
-        blob: new Blob([lyricsLrc], { type: "text/plain;charset=utf-8" }),
-      });
-    }
-    if (cifraText || chordSheet) {
-      entries.push({
-        name: `${baseName} - cifra.txt`,
-        blob: new Blob([cifraText || chordSheet || ""], { type: "text/plain;charset=utf-8" }),
-      });
-    }
-
     try {
+      // Um unico .zip, sempre: o escritor em fluxo codifica cada trilha, guarda
+      // no pacote e libera a memoria antes da proxima. Nao existe mais o caso
+      // de "arquivo grande demais" que baixava tudo solto.
       setZipState("working");
-      if (totalSize(entries) > 512 * 1024 * 1024) {
-        downloadSequentially(entries);
-      } else {
-        const zipBlob = await createZip(entries);
-        downloadBlob(zipBlob, `${baseName} - stems${corte}.zip`);
+      setZipBytes(0);
+      const writer = createZipWriter(setZipBytes);
+      const add = (name: string, blob: Blob) => writer.add({ name, blob });
+
+      for (const stem of results) {
+        const meta = STEMS.find((item) => item.id === stem.id);
+        if (!meta) continue;
+        const audio = activeStems?.stems.get(stem.id) ?? stem;
+        // Percussao nao muda de tom (mas acompanha o andamento quando mudou).
+        const tom = fileMarks(Boolean(activeStems?.stems.has(stem.id)), !isPercussionStem(stem.id));
+        await add(
+          `${baseName} - ${meta.label}${corte}${tom}.${ext}`,
+          encodeAudio(audio.left, audio.right, exportFormat, { range: rangeSamples }),
+        );
       }
+      const voice = activeVoice ?? voiceResult;
+      if (voice) {
+        const tom = fileMarks(Boolean(activeVoice));
+        await add(
+          `${baseName} - Voz transformada${corte}${tom}.${ext}`,
+          encodeAudio(voice.left, voice.right, exportFormat, { range: rangeSamples }),
+        );
+      }
+      const mix = activeMix?.instrumental ?? instrumental;
+      if (mix) {
+        const tom = fileMarks(Boolean(activeMix?.instrumental));
+        await add(
+          `${baseName} - Instrumental${corte}${tom}.${ext}`,
+          encodeAudio(mix.getChannelData(0), mix.getChannelData(1), exportFormat, {
+            range: rangeSamples,
+          }),
+        );
+      }
+      if (lyricsText) {
+        await add(
+          `${baseName} - letra.txt`,
+          new Blob([lyricsText], { type: "text/plain;charset=utf-8" }),
+        );
+      }
+      if (lyricsLrc) {
+        await add(
+          `${baseName} - letra.lrc`,
+          new Blob([lyricsLrc], { type: "text/plain;charset=utf-8" }),
+        );
+      }
+      if (cifraText || chordSheet) {
+        await add(
+          `${baseName} - cifra.txt`,
+          new Blob([cifraText || chordSheet || ""], { type: "text/plain;charset=utf-8" }),
+        );
+      }
+
+      const zipBlob = await writer.finish();
+      downloadBlob(zipBlob, `${baseName} - stems${corte}.zip`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      setError(
+        `Não foi possível montar o .zip (${detail}). Se o pacote for muito grande para o aparelho, baixe as trilhas uma a uma no editor.`,
+      );
     } finally {
       setZipState("idle");
+      setZipBytes(0);
     }
   }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, fileMarks, instrumental, lyricsLrc, lyricsText, rangeSamples, results, voiceResult]);
 
@@ -2473,7 +2468,9 @@ export default function App() {
                 disabled={zipState === "working"}
               >
                 {zipState === "working"
-                  ? "Gerando arquivo..."
+                  ? zipBytes > 0
+                    ? `Compactando… ${(zipBytes / (1024 * 1024)).toFixed(0)} MB`
+                    : "Compactando…"
                   : selection
                     ? "Baixar trecho (.zip)"
                     : "Baixar tudo (.zip)"}
