@@ -102,12 +102,38 @@ export function SupportCard({ onClose }: SupportCardProps) {
             <h3>Sobre o sistema</h3>
             <ul>
               <li>
-                <b>FPStudio - Stems v.0.1 - 2027</b> (Beta)
+                <b>FPStudio - Stems v.0.1 - 2027</b> (Beta) — estúdio de separação, partitura e
+                cifra no navegador.
               </li>
-              <li>Separa a musica em trilhas: voz, bateria, baixo e outros.</li>
-              <li>Processamento 100% no seu navegador — nada e enviado a servidores.</li>
-              <li>Tambem busca no YouTube, letra, cifra (Cifra Club) e harmonia.</li>
-              <li>Editor de trilhas com corte A/B e exportacao em WAV/MP3.</li>
+              <li>
+                <b>Separação em 4 a 12 trilhas</b> (IA Demucs): voz principal, backing, bateria,
+                baixo, guitarra, piano e outros — com sub-baixo, ressonância da bateria e partes
+                graves/agudas. O app sugere quantas trilhas pedir conforme a música.
+              </li>
+              <li>
+                <b>Roda 100% no seu aparelho</b> (GPU/WebGPU ou CPU): o áudio não é enviado a
+                servidores e os modelos ficam em cache no navegador.
+              </li>
+              <li>
+                <b>Editor de trilhas</b>: mudo, solo e volume por trilha, corte A/B, download de
+                cada stem e exportação em WAV/MP3.
+              </li>
+              <li>
+                <b>Tom e andamento</b>: transpor move voz e harmonia e a cifra acompanha (a bateria
+                fica); mudar o andamento não desafina, com metrônomo alinhado ao áudio.
+              </li>
+              <li>
+                <b>Clonar Voz</b> (em fase experimental): troca o timbre da voz principal por DSP,
+                sem baixar modelo extra, dentro da tonalidade da música.
+              </li>
+              <li>
+                <b>Partitura</b> (em fase experimental): melodia no pentagrama com cifra, armadura
+                e linha do compasso; exporta MusicXML e MIDI.
+              </li>
+              <li>
+                <b>Cifra e letra</b>: cifra do Cifra Club, transcrição da letra, harmonia detectada
+                e download em .txt/.lrc.
+              </li>
             </ul>
             <p className="support-dev">
               Fernando Sena Desenvolvimento em Geral — FPStudio Gravaçoes.
