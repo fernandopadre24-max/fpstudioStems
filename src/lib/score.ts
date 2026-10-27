@@ -238,9 +238,12 @@ function quantizeNotes(
   if (notes.length === 0) return events;
 
   const sorted = notes.slice().sort((a, b) => a.start - b.start);
-  const firstUnits = Math.max(0, Math.round(sorted[0].start / gridSeconds));
 
-  let cursor = firstUnits;
+  // O cursor comeca no ZERO do compasso 1, nao na primeira nota: o silencio
+  // antes da entrada e' musica tambem. Antes, uma trilha que entrava no
+  // compasso 3 era escrita comecando no compasso 1 — a pauta inteira saia
+  // deslocada e as barras nao batiam com o audio.
+  let cursor = 0;
   for (let i = 0; i < sorted.length; i++) {
     const note = sorted[i];
     const startUnits = Math.max(cursor, Math.round(note.start / gridSeconds));
@@ -359,11 +362,12 @@ interface GridFit {
 
 /** Compassos simples avaliados. So beatType 4: e' o que cobre quase toda musica
  *  pop e mantem `gridSeconds = 60/bpm/4` consistente (o ramo 6/8 do codigo
- *  antigo contava o tempo de um jeito diferente e desalinha a grade). */
+ *  antigo contava o tempo de um jeito diferente e desalinha a grade).
+ *  Fica de fora 2/4: na pratica ele quase sempre e' um 4/4 com acento no 3, e
+ *  escolher 2/4 dobra a contagem de compassos e poe barra no meio da frase. */
 const METER_CANDIDATES: { beatsPerBar: number; prior: number }[] = [
   { beatsPerBar: 4, prior: 1 },
   { beatsPerBar: 3, prior: 0.94 },
-  { beatsPerBar: 2, prior: 0.88 },
 ];
 
 /**
@@ -384,11 +388,16 @@ function strengthAt(notes: MelodyNote[], time: number, tolerance: number): numbe
   }
   if (!target || distance > tolerance) return 0;
   const duration = Math.min(target.end - target.start, tolerance * 8);
-  let gap = 0;
+  // Silencio que ANTECEDE a nota: distancia ate o fim da nota mais proxima que
+  // ja terminou. A versao antiga pegava a maior distancia (ate a primeira nota
+  // da musica), que cresce sem parar e achatava o acento.
+  let gap = Infinity;
   for (const note of notes) {
-    if (note.end <= target.start && target.start - note.end < gap) continue;
-    if (note.end <= target.start && target.start - note.end > gap) gap = target.start - note.end;
+    if (note.end > target.start) continue;
+    const delta = target.start - note.end;
+    if (delta < gap) gap = delta;
   }
+  if (!Number.isFinite(gap)) gap = 0;
   return duration + 0.6 * Math.min(gap, tolerance * 4);
 }
 
@@ -539,16 +548,21 @@ function fitGrid(
       defaultOffset = candidateOffset;
     }
   }
-  // Margem alta de proposito. A maioria da musica pop e' 4/4, nao da para
-  // ouvir para conferir, e um metro alternativo errado DOBRA ou triplica a
-  // contagem de compassos — o proprio sintoma reclamado. So vale trocar quando
-  // a valsa se impoe sem margem de duvida e ha notas suficientes para julgar.
-  if (
-    bestMeter.beatsPerBar !== 4 &&
-    (notes.length < 12 || bestScore < defaultScore * 1.5)
-  ) {
-    bestMeter = { beatsPerBar: 4, prior: 1 };
-    bestOffset = defaultOffset === -Infinity ? stepPhase : defaultOffset;
+  // 4/4 e' o padrao da musica popular. Trocar para 3/4 so com evidencia clara:
+  // o acento do "1" tem de ganhar do 4/4 por uma margem ABSOLUTA (0,2 numa
+  // escala de -1 a 1) e ser forte por si so (>= 0,15), com notas suficientes
+  // para julgar. Antes a comparacao era relativa (1,5x) e um acompanhamento com
+  // acento a cada 2 tempos virava 2/4: as barras caiam no meio da frase e a
+  // pauta dizia o dobro de compassos.
+  if (bestMeter.beatsPerBar !== 4) {
+    const clear =
+      notes.length >= 16 &&
+      bestScore >= 0.15 &&
+      (!Number.isFinite(defaultScore) || bestScore >= defaultScore + 0.2);
+    if (!clear) {
+      bestMeter = { beatsPerBar: 4, prior: 1 };
+      bestOffset = defaultOffset === -Infinity ? stepPhase : defaultOffset;
+    }
   }
 
   const beatType = forced?.beatType ?? 4;

@@ -2264,6 +2264,38 @@ body {
   color: var(--text);
 }
 
+/* Aviso de leitura harmonica (piano/guitarra): a pauta traz a voz de cima. */
+.score-tip {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+  border-left: 2px solid rgba(124, 92, 255, 0.5);
+  padding-left: 10px;
+}
+
+/* Ajuste fino do compasso: fica logo abaixo dos dados da pauta. */
+.score-adjust {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.score-adjust .btn-mini {
+  padding: 5px 9px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+.score-adjust-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 .score-view {
   width: 100%;
   min-width: 300px;

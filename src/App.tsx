@@ -117,6 +117,13 @@ interface VoiceResult {
   label: string;
 }
 
+/**
+ * Trilhas que normalmente tocam varias notas juntas. A pauta segue UMA linha
+ * (a de cima): os acordes completos nao sao transcritos, e o painel avisa isso
+ * para a pessoa nao achar que faltaram notas.
+ */
+const HARMONIC_SOURCES = new Set<string>(["piano", "guitar", "other", "otherHigh", "otherLow"]);
+
 /** Melodia crua da trilha escolhida, antes de virar pauta. Guardar os ataques
  *  (e nao a partitura pronta) deixa o tom e o andamento mudarem na hora, sem
  *  ler a trilha de novo. */
@@ -317,6 +324,10 @@ export default function App() {
   const [scoreWarning, setScoreWarning] = useState<string | null>(null);
   const [scoreBase, setScoreBase] = useState<ScoreBase | null>(null);
   const [scoreStep, setScoreStep] = useState("");
+  // Ajuste manual do compasso, em TEMPOS: quando o "1" medido no audio cai no
+  // lugar errado (introducao com anacruse, banda com acento deslocado), a pauta
+  // inteira sai deslocada. Duas setas movem a grade sem refazer a analise.
+  const [scoreBarShift, setScoreBarShift] = useState(0);
   // Aba recolhivel da partitura: mesmo padrao do "Clonar Voz" (seta no canto).
   // Comeca FECHADA (abre so quando a pessoa quiser ver a pauta) e a escolha
   // fica guardada, entao quem abriu nao precisa abrir de novo.
@@ -511,7 +522,10 @@ export default function App() {
           }));
     return buildScore(notes, {
       bpm: scoreBase.bpm > 0 ? scoreBase.bpm / ratio : undefined,
-      beatOffset: scoreBase.bpm > 0 ? scoreBase.beatOffset * ratio : undefined,
+      beatOffset:
+        scoreBase.bpm > 0
+          ? (scoreBase.beatOffset + (scoreBarShift * 60) / scoreBase.bpm) * ratio
+          : undefined,
       key,
       chords,
       instrumentLabel: scoreBase.instrumentLabel,
@@ -519,7 +533,7 @@ export default function App() {
       artist: scoreBase.artist,
       medianMidi: scoreBase.medianMidi + shift,
     });
-  }, [scoreBase, semitones, timeRatio]);
+  }, [scoreBase, semitones, timeRatio, scoreBarShift]);
 
   // --- Troca de tom ---
   //
@@ -769,14 +783,17 @@ export default function App() {
     // tempo 1, e era isso que deixava o clique fora da musica. O offset do
     // score fica so como reserva quando a analise ainda nao chegou.
     const phase = analysis ? analysis.beatOffset : (score?.offset ?? 0);
+    // O ajuste manual de compasso move o acento do "1" junto com a pauta (o
+    // clique em si nao muda: um tempo inteiro e' o proprio periodo).
+    const shiftSec = baseBpm > 0 ? (scoreBarShift * 60) / baseBpm : 0;
     return {
       bpm: baseBpm && ratio > 0 ? baseBpm / ratio : 120,
       beatsPerBar: score?.beatsPerBar ?? 4,
       // Segundos do tempo original: escala junto com o andamento.
-      offsetSec: phase * ratio,
+      offsetSec: (phase + shiftSec) * ratio,
       durationSec: mixerSec,
     };
-  }, [results, activeStems, baseBpm, score, analysis]);
+  }, [results, activeStems, baseBpm, score, analysis, scoreBarShift]);
 
   // Trilhas que continuam no editor: as removidas saem do mixer, do .zip e da
   // lista de fontes da partitura (mas os dados seguem na memoria ate restaurar).
@@ -1445,6 +1462,8 @@ export default function App() {
   useEffect(() => {
     setScoreBase(null);
     setScoreError(null);
+    // Outra musica/fonte: o ajuste de compasso anterior nao vale mais.
+    setScoreBarShift(0);
   }, [file, scoreSource]);
 
   const scoreAbc = useMemo(() => (score ? buildAbc(score) : ""), [score]);
@@ -2750,6 +2769,47 @@ export default function App() {
                       </b>
                     </span>
                     <span>{score.notes.length} notas detectadas</span>
+                  </div>
+                  {HARMONIC_SOURCES.has(scoreSource) && (
+                    <p className="score-tip">
+                      {STEM_BY_ID.get(scoreSource as StemId)?.label ?? "Este instrumento"} costuma
+                      tocar acordes. A pauta mostra a <b>linha principal</b> (a nota de cima); o
+                      acorde completo não é transcrito — para acompanhar, use a cifra acima.
+                    </p>
+                  )}
+                  <div className="score-adjust" role="group" aria-label="Ajustar compasso">
+                    <span>As barras não caem no “1”? Empurre:</span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-mini"
+                      onClick={() => setScoreBarShift((value) => value - 1)}
+                      title="Move as barras um tempo para a esquerda"
+                    >
+                      ◀ Barras
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-mini"
+                      onClick={() => setScoreBarShift((value) => value + 1)}
+                      title="Move as barras um tempo para a direita"
+                    >
+                      Barras ▶
+                    </button>
+                    {scoreBarShift !== 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-mini"
+                        onClick={() => setScoreBarShift(0)}
+                      >
+                        Repor
+                      </button>
+                    )}
+                    {scoreBarShift !== 0 && (
+                      <b className="score-adjust-value">
+                        {scoreBarShift > 0 ? "+" : ""}
+                        {scoreBarShift} tempo{Math.abs(scoreBarShift) === 1 ? "" : "s"}
+                      </b>
+                    )}
                   </div>
                   <ScoreView
                     abc={scoreAbc}
