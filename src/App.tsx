@@ -2777,6 +2777,7 @@ export default function App() {
                       acorde completo não é transcrito — para acompanhar, use a cifra acima.
                     </p>
                   )}
+                  {scoreBase && scoreBase.bpm > 0 && (
                   <div className="score-adjust" role="group" aria-label="Ajustar compasso">
                     <span>As barras não caem no “1”? Empurre:</span>
                     <button
@@ -2811,6 +2812,7 @@ export default function App() {
                       </b>
                     )}
                   </div>
+                  )}
                   <ScoreView
                     abc={scoreAbc}
                     color={theme === "light" ? "#1a1d27" : "#e7ecf7"}
