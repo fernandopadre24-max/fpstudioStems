@@ -10,6 +10,7 @@ import {
   type StemId,
   type StemModelMeta,
   type StemPreset,
+  type VocalMode,
 } from "./lib/constants";
 import { separateDrumsPercussion } from "./lib/hpss";
 import { BASS_CUTOFF, DRUM_CUTOFF, OTHER_CUTOFF, splitBands } from "./lib/bands";
@@ -305,7 +306,7 @@ async function separate(
   right: Float32Array,
   backend: Backend,
   preset: StemPreset,
-  splitVocals: boolean,
+  vocalMode: VocalMode,
 ): Promise<void> {
   cancelled = false;
   if (backend === "webgpu") webgpuUsable = true;
@@ -315,7 +316,7 @@ async function separate(
   try {
     const handle = await getSession(model, backend);
     used = handle.backend;
-    await separateWithSession(handle.session, left, right, model, preset, used, splitVocals);
+    await separateWithSession(handle.session, left, right, model, preset, used, vocalMode);
   } catch (error) {
     if (cancelled) {
       post({ type: "cancelled" });
@@ -332,7 +333,7 @@ async function separate(
       reason: describeError(error),
     });
     const handle = await getSession(model, "wasm");
-    await separateWithSession(handle.session, left, right, model, preset, "wasm", splitVocals);
+    await separateWithSession(handle.session, left, right, model, preset, "wasm", vocalMode);
   }
 }
 
@@ -357,7 +358,7 @@ async function separateWithSession(
   model: StemModelMeta,
   preset: StemPreset,
   backend: "webgpu" | "wasm",
-  splitVocals: boolean,
+  vocalMode: VocalMode,
 ): Promise<void> {
   const startedAt = performance.now();
 
@@ -447,9 +448,9 @@ async function separateWithSession(
   }
 
   // Vocais -> voz principal + backing (modelo UVR-MDX-NET KARA 2), quando a
-  // pessoa pediu a divisao. Sem a opcao, os vocais seguem inteiros.
+  // pessoa pediu a divisao. Nos modos "single" e "none" o modelo extra nao roda.
   const vocals = get("vocals");
-  if (splitVocals && vocals) {
+  if (vocalMode === "split" && vocals) {
     post({
       type: "separation-note",
       message: "Separando voz principal do backing (modelo extra)...",
@@ -517,12 +518,14 @@ async function separateWithSession(
     }
   }
 
-  // Lista final: as trilhas do preset com voz/backing divididos apenas se a
-  // divisao realmente aconteceu. Se o modelo KARA falhar, os vocais voltam
-  // inteiros em vez de sumirem.
-  const splitDone = splitVocals && produced.has("leadVocal") && produced.has("backingVocal");
+  // Lista final de acordo com o modo de vocais. Se a divisao foi pedida mas o
+  // modelo KARA falhou, os vocais voltam inteiros em vez de sumirem.
+  const splitDone =
+    vocalMode === "split" && produced.has("leadVocal") && produced.has("backingVocal");
+  const outputMode: VocalMode =
+    vocalMode === "split" && !splitDone ? "single" : vocalMode;
   const payloads: StemResultPayload[] = [];
-  for (const id of presetStemIds(preset, splitDone)) {
+  for (const id of presetStemIds(preset, outputMode)) {
     const stem = produced.get(id);
     if (!stem) continue;
     payloads.push({
@@ -567,7 +570,7 @@ ctx.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         message.right,
         message.backend,
         getPreset(message.preset),
-        message.splitVocals,
+        message.vocalMode,
       );
     }
   } catch (error) {

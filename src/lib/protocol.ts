@@ -1,4 +1,4 @@
-import type { Backend, StemId, StemModelId, StemPresetId } from "./constants";
+import type { Backend, StemId, StemModelId, StemPresetId, VocalMode } from "./constants";
 
 export type WorkerRequest =
   | { type: "check-model"; model: StemModelId }
@@ -9,8 +9,8 @@ export type WorkerRequest =
       right: Float32Array;
       backend: Backend;
       preset: StemPresetId;
-      /** Opcao do usuario: divide os vocais em voz principal + backing. */
-      splitVocals: boolean;
+      /** Como os vocais saem: divididos, em uma trilha ou fora do resultado. */
+      vocalMode: VocalMode;
     }
   | { type: "cancel" };
 

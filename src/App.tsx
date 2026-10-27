@@ -43,6 +43,7 @@ import {
   type Backend,
   type StemId,
   type StemPresetId,
+  type VocalMode,
 } from "./lib/constants";
 import { createZipWriter, downloadBlob, sanitizeBaseName } from "./lib/download";
 import { getYtDlpStatus } from "./lib/youtube";
@@ -257,10 +258,10 @@ export default function App() {
   const [separationProgress, setSeparationProgress] = useState<SeparationProgress | null>(null);
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
   const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
-  // Divisao de voz principal + backing: opcional e independente do preset.
-  // null = segue o padrao do preset (8/10/12 ja dividem); true/false = escolha
-  // manual, que vale ate trocar de preset ou de musica.
-  const [splitVocalsOverride, setSplitVocalsOverride] = useState<boolean | null>(null);
+  // Vocais: "split" (voz principal + backing), "single" (uma trilha de vocais)
+  // ou "none" (sem trilha de voz, resultado instrumental). Opcional e
+  // independente do preset; null = segue o padrao do preset (8/10/12 dividem).
+  const [vocalModeOverride, setVocalModeOverride] = useState<VocalMode | null>(null);
   // Sugestao de quantas trilhas separar, medida no proprio audio (lib/stemHint).
   const [presetTouched, setPresetTouched] = useState(false);
   const stemHint = useMemo(() => {
@@ -275,7 +276,7 @@ export default function App() {
   // escolha ate trocar de musica.
   useEffect(() => {
     setPresetTouched(false);
-    setSplitVocalsOverride(null);
+    setVocalModeOverride(null);
   }, [decoded]);
   useEffect(() => {
     if (!stemHint || presetTouched) return;
@@ -977,9 +978,10 @@ export default function App() {
 
   const preset = getPreset(presetChoice);
   const model = getModel(preset.model);
-  // Voz e backing: por padrao segue o preset; a escolha manual manda.
-  const splitVocals = splitVocalsOverride ?? preset.vocals;
-  const stemCount = presetStemIds(preset, splitVocals).length;
+  // Vocais: por padrao segue o preset; a escolha manual manda.
+  const presetVocalMode: VocalMode = preset.vocals ? "split" : "single";
+  const vocalMode = vocalModeOverride ?? presetVocalMode;
+  const stemCount = presetStemIds(preset, vocalMode).length;
 
   useEffect(() => {
     setModelStatus("unknown");
@@ -1093,9 +1095,9 @@ export default function App() {
       decoded.right,
       backendChoice,
       presetChoice,
-      splitVocals,
+      vocalMode,
     );
-  }, [backendChoice, decoded, presetChoice, splitVocals]);
+  }, [backendChoice, decoded, presetChoice, vocalMode]);
 
   const cancelSeparation = useCallback(() => {
     engineRef.current?.cancel();
@@ -1455,7 +1457,7 @@ export default function App() {
     const ready = new Set((results ?? []).map((stem) => String(stem.id)));
     // Trilhas do preset com a divisao de voz/backing atual + o que ja existe
     // separado (uma separacao antiga pode ter outras trilhas).
-    const available: StemId[] = presetStemIds(preset, splitVocals);
+    const available: StemId[] = presetStemIds(preset, vocalMode);
     for (const stem of results ?? []) {
       if (!available.includes(stem.id)) available.push(stem.id);
     }
@@ -1472,7 +1474,7 @@ export default function App() {
     });
     if (decoded) options.push({ id: "original", label: "Música original (mix)" });
     return options;
-  }, [decoded, preset, results, removedStems, splitVocals]);
+  }, [decoded, preset, results, removedStems, vocalMode]);
 
   useEffect(() => {
     if (scoreSources.length === 0) return;
@@ -2379,30 +2381,69 @@ export default function App() {
               <h2>Separar em {stemCount} trilhas</h2>
               <p>
                 {preset.description}{" "}
-                {splitVocals !== preset.vocals &&
-                  (splitVocals
-                    ? "Com a divisão ligada, os vocais saem em voz principal + backing."
-                    : "Com a divisão desligada, os vocais saem em uma trilha só.")}{" "}
+                {vocalMode !== presetVocalMode &&
+                  (vocalMode === "none"
+                    ? "Nesta separação não sai trilha de voz: o resultado é instrumental."
+                    : vocalMode === "single"
+                      ? "Nesta separação os vocais saem em uma trilha só."
+                      : "Nesta separação os vocais saem em voz principal + backing.")}{" "}
                 O processamento acontece inteiramente na sua maquina.
               </p>
             </div>
 
-            <label className="field-toggle vocal-split">
-              <input
-                type="checkbox"
-                checked={splitVocals}
-                onChange={(event) => setSplitVocalsOverride(event.target.checked)}
-                disabled={phase === "separating"}
-              />
-              <span className="vocal-split-text">
-                <b>Separar voz principal e backing vocal</b>
-                <small>
-                  Opcional: divide os vocais em duas trilhas com o modelo KARA 2 (~
-                  {Math.round(BACKING_VOCAL_MODEL.sizeBytes / (1024 * 1024))} MB na primeira
-                  vez).
-                </small>
-              </span>
-            </label>
+            <fieldset className="vocal-mode" disabled={phase === "separating"}>
+              <legend>Vocais na separação</legend>
+              <div className="vocal-mode-options">
+                <label className="vocal-mode-option">
+                  <input
+                    type="radio"
+                    name="vocal-mode"
+                    value="split"
+                    checked={vocalMode === "split"}
+                    onChange={() => setVocalModeOverride("split")}
+                  />
+                  <span>
+                    <b>Voz + backing</b>
+                    <small>Voz principal e backing/harmonia em duas trilhas.</small>
+                  </span>
+                </label>
+                <label className="vocal-mode-option">
+                  <input
+                    type="radio"
+                    name="vocal-mode"
+                    value="single"
+                    checked={vocalMode === "single"}
+                    onChange={() => setVocalModeOverride("single")}
+                  />
+                  <span>
+                    <b>Vocais (1 trilha)</b>
+                    <small>A voz inteira em uma trilha só.</small>
+                  </span>
+                </label>
+                <label className="vocal-mode-option">
+                  <input
+                    type="radio"
+                    name="vocal-mode"
+                    value="none"
+                    checked={vocalMode === "none"}
+                    onChange={() => setVocalModeOverride("none")}
+                  />
+                  <span>
+                    <b>Sem vocais</b>
+                    <small>Nenhuma trilha de voz; o resultado fica instrumental.</small>
+                  </span>
+                </label>
+              </div>
+              <small className="vocal-mode-hint">
+                {vocalMode === "split"
+                  ? `Duas trilhas, com o modelo KARA 2 (~${Math.round(
+                      BACKING_VOCAL_MODEL.sizeBytes / (1024 * 1024),
+                    )} MB na primeira vez).`
+                  : vocalMode === "single"
+                    ? "Uma trilha com a voz principal e o backing juntos."
+                    : "Só bateria, baixo e instrumentos. O mix original continua disponível para ouvir."}
+              </small>
+            </fieldset>
 
             <div className="controls-row">
               <label className="field">
@@ -2412,7 +2453,7 @@ export default function App() {
                   onChange={(event) => {
                     setPresetTouched(true);
                     setPresetChoice(event.target.value as StemPresetId);
-                    setSplitVocalsOverride(null);
+                    setVocalModeOverride(null);
                   }}
                   disabled={phase === "separating"}
                 >
@@ -2475,9 +2516,10 @@ export default function App() {
               <p className="stem-hint">
                 <span className="stem-hint-tag">Sugestão</span>
                 {stemHint.count} trilhas para esta música — {stemHint.reason}.
-                {splitVocals &&
+                {vocalMode === "split" &&
                   !preset.vocals &&
                   " A divisão de voz e backing soma 2 trilhas (voz principal + backing)."}
+                {vocalMode === "none" && " Sem vocais, a trilha de voz não entra no resultado."}
                 {presetChoice !== stemHint.preset && " Você escolheu outra quantidade."}
               </p>
             )}

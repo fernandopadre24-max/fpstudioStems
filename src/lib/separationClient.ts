@@ -1,4 +1,4 @@
-import type { Backend, StemModelId, StemPresetId } from "./constants";
+import type { Backend, StemModelId, StemPresetId, VocalMode } from "./constants";
 import type { WorkerRequest, WorkerResponse } from "./protocol";
 
 type Listener = (message: WorkerResponse) => void;
@@ -49,9 +49,9 @@ export class SeparationEngine {
     right: Float32Array,
     backend: Backend,
     preset: StemPresetId,
-    splitVocals: boolean,
+    vocalMode: VocalMode,
   ) {
-    this.send({ type: "separate", left, right, backend, preset, splitVocals });
+    this.send({ type: "separate", left, right, backend, preset, vocalMode });
   }
 
   cancel() {

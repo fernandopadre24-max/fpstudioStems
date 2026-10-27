@@ -584,34 +584,88 @@ body {
   cursor: default;
 }
 
-/* Opcao de separar voz principal + backing: ocupa a linha inteira e explica
-   o custo (download do modelo KARA 2) em letra menor. */
-.vocal-split {
+/* Escolha dos vocais antes de separar: tres cartoes (voz + backing, uma
+   trilha, sem vocais) + uma linha explicando o efeito da escolha. */
+.vocal-mode {
+  margin: 4px 0 16px;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.vocal-mode legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.vocal-mode-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vocal-mode-option {
   display: flex;
   align-items: flex-start;
-  width: 100%;
-  margin: 0 0 16px;
+  gap: 8px;
+  flex: 1 1 210px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
 }
 
-.vocal-split input {
-  margin-top: 2px;
+.vocal-mode-option:has(input:checked) {
+  border-color: rgba(124, 92, 255, 0.8);
+  background: rgba(124, 92, 255, 0.12);
+}
+
+.vocal-mode-option input {
   flex: 0 0 auto;
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: #7c5cff;
+  cursor: pointer;
 }
 
-.vocal-split-text {
+.vocal-mode-option span {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.vocal-split-text b {
+.vocal-mode-option b {
+  font-size: 13.5px;
   font-weight: 600;
 }
 
-.vocal-split-text small {
+.vocal-mode-option small {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.vocal-mode-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
   line-height: 1.45;
+}
+
+.vocal-mode-option:has(input:disabled) {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .progress-note {
