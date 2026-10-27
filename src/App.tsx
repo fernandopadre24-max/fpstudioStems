@@ -392,6 +392,8 @@ export default function App() {
   // Trilha escolhida para a partitura que ainda precisa ser separada; quando a
   // separacao termina, a partitura e gerada automaticamente.
   const pendingScoreRef = useRef<string | null>(null);
+  // Perfil de voz escolhido para aplicar na musica que ainda precisa ser separada.
+  const pendingVoiceRef = useRef<string | null>(null);
   // Transformacao de voz em andamento (para poder cancelar).
   const voiceJobRef = useRef<VoiceJob | null>(null);
   // Troca de tom em andamento: o run id desarma um batch antigo sem corrida
@@ -862,6 +864,15 @@ export default function App() {
     if (activePlayback !== "mixer") mixer.stop();
   }, [activePlayback, mixer.stop]);
 
+  // Quando uma voz transformada chega, silencia a voz original e ativa a nova
+  // no editor para que o usuario ouca a nova voz imediatamente na musica.
+  useEffect(() => {
+    if (!voiceResult) return;
+    mixer.setTrackState("leadVocal", { muted: true });
+    mixer.setTrackState("vocals", { muted: true });
+    mixer.setTrackState("clonedVocal", { muted: false });
+  }, [voiceResult, mixer.setTrackState]);
+
   // Tocador que move o playhead da partitura: a musica original ou o mixer.
   // A barra de posicao do painel da partitura segue esta mesma fonte.
   const scorePlayer = activePlayback === "original" ? musicPlayer : mixer;
@@ -1040,6 +1051,11 @@ export default function App() {
       setOriginalBuffer(null);
       setOriginalPeaks(null);
       setDecoded(null);
+      setVoiceResult(null);
+      setVoicePreview(null);
+      setVoiceStats(null);
+      setVoiceError(null);
+      pendingVoiceRef.current = null;
       setFile(next);
       setTrackMeta(meta ?? null);
       setLyrics(null);
@@ -1237,9 +1253,10 @@ export default function App() {
   }, [voiceSource, voiceMeasureKey]);
 
   const runVoice = useCallback(
-    async (target: "preview" | "full") => {
+    async (target: "preview" | "full", overrideProfileId?: string) => {
       if (!voiceSource) return;
-      const profile = getVoiceProfile(voiceProfileId);
+      const targetProfileId = overrideProfileId ?? voiceProfileId;
+      const profile = getVoiceProfile(targetProfileId);
       setVoiceError(null);
       setVoiceStatus("working");
       setVoiceProgress(0);
@@ -1281,6 +1298,9 @@ export default function App() {
           setActivePlayback("voicePreview");
         } else {
           setVoiceResult({ left: output.left, right: output.right, peaks, label: profile.label });
+          mixer.setTrackState("leadVocal", { muted: true });
+          mixer.setTrackState("vocals", { muted: true });
+          mixer.setTrackState("clonedVocal", { muted: false });
         }
       } catch (cause) {
         setVoiceError(cause instanceof Error ? cause.message : String(cause));
@@ -1290,11 +1310,53 @@ export default function App() {
         setVoiceProgress(null);
       }
     },
-    [voiceFormant, voiceIntensity, voiceKeepKey, voiceProfileId, voiceSemitones, voiceSource, voiceStats],
+    [mixer, voiceFormant, voiceIntensity, voiceKeepKey, voiceProfileId, voiceSemitones, voiceSource, voiceStats],
   );
 
+  const handleVoiceProfileSelect = useCallback(
+    (id: string) => {
+      setVoiceProfileId(id);
+      voiceDemo.stop();
+      const profile = getVoiceProfile(id);
+      // Se ja esta aplicada e nao estamos ocupados, nao precisa reprocessar do zero
+      if (voiceResult && voiceResult.label === profile.label && voiceStatus === "idle") {
+        return;
+      }
+      if (voiceSource) {
+        void runVoice("full", id);
+      } else if (decoded) {
+        pendingVoiceRef.current = id;
+        setVoiceStatus("working");
+        setVoiceError(null);
+        if (phase === "idle" || phase === "ready") {
+          startSeparation();
+        }
+      }
+    },
+    [decoded, phase, runVoice, startSeparation, voiceDemo, voiceResult, voiceSource, voiceStatus],
+  );
+
+  // Retoma a aplicacao da voz pedida antes da separacao terminar.
+  useEffect(() => {
+    const pending = pendingVoiceRef.current;
+    if (!pending) return;
+    if (voiceSource) {
+      pendingVoiceRef.current = null;
+      void runVoice("full", pending);
+      return;
+    }
+    // Se a separação acabou sem produzir voz (falhou ou foi cancelada), cancela.
+    if (phase === "idle" && !decoded) {
+      pendingVoiceRef.current = null;
+      setVoiceStatus("idle");
+    }
+  }, [decoded, phase, runVoice, voiceSource]);
+
   const cancelVoice = useCallback(() => {
+    pendingVoiceRef.current = null;
     voiceJobRef.current?.cancel();
+    setVoiceStatus("idle");
+    setVoiceProgress(null);
   }, []);
 
   const downloadVoice = useCallback(() => {
@@ -2659,7 +2721,15 @@ export default function App() {
                   peaks: stem.peaks,
                 })),
                 ...(voiceResult && !removedStems.includes("clonedVocal")
-                  ? [{ meta: STEM_BY_ID.get("clonedVocal")!, peaks: voiceResult.peaks }]
+                  ? [
+                      {
+                        meta: {
+                          ...STEM_BY_ID.get("clonedVocal")!,
+                          label: `Voz: ${voiceResult.label}`,
+                        },
+                        peaks: voiceResult.peaks,
+                      },
+                    ]
                   : []),
                 // Canal do metronome: onda com um impulso por tempo, na grade
                 // certa (mesma spec que gera os cliques).
@@ -2703,7 +2773,7 @@ export default function App() {
             progress={voiceProgress}
             error={voiceError}
             profileId={voiceProfileId}
-            onProfile={setVoiceProfileId}
+            onProfile={handleVoiceProfileSelect}
             intensity={voiceIntensity}
             onIntensity={setVoiceIntensity}
             semitones={voiceSemitones}
@@ -2725,6 +2795,11 @@ export default function App() {
             onDownload={downloadVoice}
             onMeasure={() => setVoiceMeasureKey((key) => key + 1)}
             onSeparate={startSeparation}
+            isMixerPlaying={mixer.playing}
+            onToggleMixer={() => {
+              setActivePlayback("mixer");
+              mixer.toggle();
+            }}
           />
         )}
 

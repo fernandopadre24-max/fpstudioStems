@@ -46,6 +46,8 @@ interface VoiceCardProps {
   onDownload: () => void;
   onMeasure: () => void;
   onSeparate: () => void;
+  isMixerPlaying?: boolean;
+  onToggleMixer?: () => void;
 }
 
 function semitoneLabel(value: number): string {
@@ -86,6 +88,8 @@ export function VoiceCard({
   onDownload,
   onMeasure,
   onSeparate,
+  isMixerPlaying,
+  onToggleMixer,
 }: VoiceCardProps) {
   const profile = getVoiceProfile(profileId);
   const player = useSimplePlayer(preview?.buffer ?? null, active, onActivate);
@@ -178,8 +182,7 @@ export function VoiceCard({
       <div className="voice-body" id="voice-body" hidden={!open}>
         <div className="voice-pick">
           <span className="voice-pick-label">
-            Tipo de voz (por estilo) — passe o mouse e toque no play para ouvir o timbre num trecho de
-            exemplo cantado por uma pessoa de verdade
+            Tipo de voz (por estilo) — clique na foto para aplicar na música, ou no play para ouvir um trecho de exemplo
           </span>
           <VoiceGallery
             profileId={profileId}
@@ -187,6 +190,8 @@ export function VoiceCard({
             disabled={busy}
             onDemo={onDemo}
             stateOf={demoStateOf}
+            busy={busy}
+            progress={progress}
           />
           <p className="voice-credit">
             Exemplos cantados por pessoas de verdade: cada figura adulta toca uma gravacao
@@ -207,12 +212,15 @@ export function VoiceCard({
         {!ready ? (
           <div className="voice-empty">
             <p>
-              Ouça os tipos de voz no exemplo acima. Para aplicar um deles na sua musica, separe as
-              trilhas primeiro: e preciso isolar a voz principal.
+              {busy
+                ? "Separando as trilhas da música para isolar a voz e aplicar o timbre selecionado..."
+                : "Ouça os tipos de voz no exemplo acima ou clique em uma das fotos para separar as trilhas e aplicar direto na sua música."}
             </p>
-            <button type="button" className="btn btn-secondary" onClick={onSeparate}>
-              Separar trilhas agora
-            </button>
+            {!busy && (
+              <button type="button" className="btn btn-secondary" onClick={onSeparate}>
+                Separar trilhas agora
+              </button>
+            )}
           </div>
         ) : (
           <>
@@ -350,10 +358,21 @@ export function VoiceCard({
             {demoError && <p className="voice-error">Previa da galeria: {demoError}</p>}
 
             {appliedLabel && !busy && (
-              <p className="voice-done">
-                Voz transformada pronta: <strong>{appliedLabel}</strong>. Ela entrou no editor de
-                trilhas — deixe a voz original no mudo para ouvir so a nova.
-              </p>
+              <div className="voice-done-box">
+                <p className="voice-done">
+                  ✓ Voz transformada pronta: <strong>{appliedLabel}</strong>. Ela foi aplicada na música (a voz original foi colocada no mudo no editor).
+                </p>
+                {onToggleMixer && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={onToggleMixer}
+                  >
+                    {isMixerPlaying ? <PauseIcon /> : <PlayIcon />}
+                    {isMixerPlaying ? "Pausar música" : "Ouvir música com a nova voz"}
+                  </button>
+                )}
+              </div>
             )}
 
             {preview && (

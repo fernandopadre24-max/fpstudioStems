@@ -11,6 +11,8 @@ interface VoiceGalleryProps {
   /** Toca (ou para) o trecho de exemplo com o timbre deste perfil. */
   onDemo: (id: string) => void;
   stateOf: (id: string) => VoiceDemoState;
+  busy?: boolean;
+  progress?: number | null;
 }
 
 /** "Feminino — Pop" -> "Feminino": o estilo ja esta no titulo do grupo. */
@@ -18,7 +20,15 @@ function shortLabel(profile: VoiceProfile): string {
   return profile.label.split(" — ")[0] ?? profile.label;
 }
 
-export function VoiceGallery({ profileId, onSelect, disabled, onDemo, stateOf }: VoiceGalleryProps) {
+export function VoiceGallery({
+  profileId,
+  onSelect,
+  disabled,
+  onDemo,
+  stateOf,
+  busy,
+  progress,
+}: VoiceGalleryProps) {
   const groups = useMemo(() => voiceGroups(), []);
 
   return (
@@ -33,7 +43,10 @@ export function VoiceGallery({ profileId, onSelect, disabled, onDemo, stateOf }:
               const selected = profile.id === profileId;
               const label = state === "playing" ? "Parar exemplo" : "Ouvir exemplo";
               return (
-                <div className={`voice-face${selected ? " is-selected" : ""}`} key={profile.id}>
+                <div
+                  className={`voice-face${selected ? " is-selected" : ""}${selected && busy ? " is-applying" : ""}`}
+                  key={profile.id}
+                >
                   <div className="voice-face-shot">
                     <button
                       type="button"
@@ -54,23 +67,35 @@ export function VoiceGallery({ profileId, onSelect, disabled, onDemo, stateOf }:
                       ) : (
                         <span className="voice-face-empty">{shortLabel(profile)}</span>
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      className="voice-face-play"
-                      onClick={() => onDemo(profile.id)}
-                      disabled={disabled}
-                      title={label}
-                      aria-label={`${label} — ${profile.label}`}
-                    >
-                      {state === "loading" ? (
-                        <span className="voice-face-spin" />
-                      ) : state === "playing" ? (
-                        <PauseIcon />
-                      ) : (
-                        <PlayIcon />
+                      {selected && busy && (
+                        <div className="voice-face-overlay">
+                          <span className="voice-face-spin" />
+                          <span className="voice-face-overlay-text">
+                            {progress !== null && progress !== undefined && progress > 0
+                              ? `${Math.round(progress * 100)}%`
+                              : "Aplicando..."}
+                          </span>
+                        </div>
                       )}
                     </button>
+                    {!busy && (
+                      <button
+                        type="button"
+                        className="voice-face-play"
+                        onClick={() => onDemo(profile.id)}
+                        disabled={disabled}
+                        title={label}
+                        aria-label={`${label} — ${profile.label}`}
+                      >
+                        {state === "loading" ? (
+                          <span className="voice-face-spin" />
+                        ) : state === "playing" ? (
+                          <PauseIcon />
+                        ) : (
+                          <PlayIcon />
+                        )}
+                      </button>
+                    )}
                   </div>
                   <span className="voice-face-name">{shortLabel(profile)}</span>
                 </div>
