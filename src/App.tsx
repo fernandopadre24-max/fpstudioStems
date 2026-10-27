@@ -5,7 +5,7 @@ import { DropZone } from "./components/DropZone";
 import { Editor, type Selection } from "./components/Editor";
 import { SupportCard } from "./components/SupportCard";
 import { YouTubeSearch } from "./components/YouTubeSearch";
-import { useMixer, type MixerTrack } from "./hooks/useMixer";
+import { useMixer, type MixerTrack, type MixerTrackId } from "./hooks/useMixer";
 import { buildMetronome, metronomePeaks, type MetronomeSpec } from "./lib/metronome";
 import { useSimplePlayer } from "./hooks/useSimplePlayer";
 import { useVoiceDemo } from "./hooks/useVoiceDemo";
@@ -273,6 +273,9 @@ export default function App() {
   >(null);
   const [zipState, setZipState] = useState<"idle" | "working">("idle");
   const [zipBytes, setZipBytes] = useState(0);
+  // Trilhas que a pessoa tirou do editor. Saem do mixer, do .zip e dos
+  // downloads, mas ficam guardadas na memoria: "Restaurar" traz de volta.
+  const [removedStems, setRemovedStems] = useState<StemId[]>([]);
   const [gpuBlocked, setGpuBlocked] = useState<boolean>(readGpuBlocked);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [exportFormat, setExportFormat] = useState<AudioFormat>("wav");
@@ -775,14 +778,40 @@ export default function App() {
     };
   }, [results, activeStems, baseBpm, score, analysis]);
 
+  // Trilhas que continuam no editor: as removidas saem do mixer, do .zip e da
+  // lista de fontes da partitura (mas os dados seguem na memoria ate restaurar).
+  const keptResults = useMemo(
+    () => (results ? results.filter((stem) => !removedStems.includes(stem.id)) : null),
+    [results, removedStems],
+  );
+
+  // Chegou outra separacao (musica nova): as remocoes antigas nao se aplicam.
+  useEffect(() => {
+    setRemovedStems([]);
+  }, [results]);
+
+  // Voz transformada nova entra sempre visivel, mesmo que a anterior tivesse
+  // sido removida do editor.
+  useEffect(() => {
+    if (!voiceResult) return;
+    setRemovedStems((current) => current.filter((id) => id !== "clonedVocal"));
+  }, [voiceResult]);
+
+  const removeStem = useCallback((id: MixerTrackId) => {
+    if (id === "metronome") return;
+    setRemovedStems((current) => (current.includes(id) ? current : [...current, id]));
+  }, []);
+
   const mixerTracks = useMemo<MixerTrack[] | null>(() => {
-    if (!results || !metronomeSpec) return null;
-    const tracks: MixerTrack[] = results.map((stem) => {
+    if (!keptResults || !metronomeSpec) return null;
+    const tracks: MixerTrack[] = keptResults.map((stem) => {
       const audio = activeStems?.stems.get(stem.id) ?? stem;
       return { id: stem.id, left: audio.left, right: audio.right };
     });
     const voice = activeVoice ?? voiceResult;
-    if (voice) tracks.push({ id: "clonedVocal", left: voice.left, right: voice.right });
+    if (voice && !removedStems.includes("clonedVocal")) {
+      tracks.push({ id: "clonedVocal", left: voice.left, right: voice.right });
+    }
     // Metronomo: canal extra, sempre mudo na entrada (o botao no editor
     // desliga o mudo). Nao e StemId — nao entra no zip nem nos downloads.
     const click = buildMetronome(metronomeSpec);
@@ -793,7 +822,7 @@ export default function App() {
       initial: { muted: true },
     });
     return tracks;
-  }, [results, voiceResult, activeStems, activeVoice, metronomeSpec]);
+  }, [keptResults, voiceResult, activeStems, activeVoice, metronomeSpec, removedStems]);
 
   const mixer = useMixer(mixerTracks);
 
@@ -1391,18 +1420,20 @@ export default function App() {
       "drums",
     ];
     const ready = new Set((results ?? []).map((stem) => String(stem.id)));
-    const ordered = preset.stems.slice().sort((a, b) => {
-      const ia = priority.indexOf(a);
-      const ib = priority.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    });
+    const ordered = preset.stems
+      .filter((id) => !removedStems.includes(id))
+      .sort((a, b) => {
+        const ia = priority.indexOf(a);
+        const ib = priority.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
     const options: { id: string; label: string }[] = ordered.map((id) => {
       const label = STEMS.find((item) => item.id === id)?.label ?? String(id);
       return { id: String(id), label: ready.has(String(id)) ? label : `${label} — separar` };
     });
     if (decoded) options.push({ id: "original", label: "Música original (mix)" });
     return options;
-  }, [decoded, preset, results]);
+  }, [decoded, preset, results, removedStems]);
 
   useEffect(() => {
     if (scoreSources.length === 0) return;
@@ -1642,7 +1673,7 @@ export default function App() {
   }, [baseName, chordSheet, cifraText, lyricsText]);
 
   const downloadAll = useCallback(async () => {
-    if (!results) return;
+    if (!keptResults) return;
     try {
       // Um unico .zip, sempre: o escritor em fluxo codifica cada trilha, guarda
       // no pacote e libera a memoria antes da proxima. Nao existe mais o caso
@@ -1652,7 +1683,7 @@ export default function App() {
       const writer = createZipWriter(setZipBytes);
       const add = (name: string, blob: Blob) => writer.add({ name, blob });
 
-      for (const stem of results) {
+      for (const stem of keptResults) {
         const meta = STEMS.find((item) => item.id === stem.id);
         if (!meta) continue;
         const audio = activeStems?.stems.get(stem.id) ?? stem;
@@ -1664,7 +1695,7 @@ export default function App() {
         );
       }
       const voice = activeVoice ?? voiceResult;
-      if (voice) {
+      if (voice && !removedStems.includes("clonedVocal")) {
         const tom = fileMarks(Boolean(activeVoice));
         await add(
           `${baseName} - Voz transformada${corte}${tom}.${ext}`,
@@ -1711,7 +1742,7 @@ export default function App() {
       setZipState("idle");
       setZipBytes(0);
     }
-  }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, fileMarks, instrumental, lyricsLrc, lyricsText, rangeSamples, results, voiceResult]);
+  }, [activeMix, activeStems, activeVoice, baseName, chordSheet, cifraText, corte, exportFormat, ext, fileMarks, instrumental, keptResults, lyricsLrc, lyricsText, rangeSamples, removedStems, voiceResult]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -2458,7 +2489,8 @@ export default function App() {
                 <h2>Editor de trilhas</h2>
                 <p>
                   Toque, isole (M/S) e ajuste volumes. Arraste na regra A/B para cortar um trecho:
-                  reproduz em loop e os downloads saem recortados.
+                  reproduz em loop e os downloads saem recortados. O "remover" tira a trilha do
+                  editor e do .zip — e dá para restaurar.
                 </p>
               </div>
               <button
@@ -2490,13 +2522,34 @@ export default function App() {
               </div>
             )}
 
+            {removedStems.length > 0 && (
+              <div className="selection-bar removed-bar">
+                <span>
+                  Fora do editor:{" "}
+                  <b>
+                    {removedStems
+                      .map((id) => STEM_BY_ID.get(id)?.label ?? String(id))
+                      .join(", ")}
+                  </b>{" "}
+                  — fora do .zip e da reprodução.
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setRemovedStems([])}
+                >
+                  Restaurar trilhas
+                </button>
+              </div>
+            )}
+
             <Editor
               tracks={[
-                ...results.map((stem) => ({
+                ...(keptResults ?? []).map((stem) => ({
                   meta: STEMS.find((item) => item.id === stem.id)!,
                   peaks: stem.peaks,
                 })),
-                ...(voiceResult
+                ...(voiceResult && !removedStems.includes("clonedVocal")
                   ? [{ meta: STEM_BY_ID.get("clonedVocal")!, peaks: voiceResult.peaks }]
                   : []),
                 // Canal do metronome: onda com um impulso por tempo, na grade
@@ -2521,6 +2574,7 @@ export default function App() {
                 // O metronomo e um click sintetizado: nao tem arquivo.
                 if (id !== "metronome") downloadStem(id);
               }}
+              onRemove={removeStem}
               downloadLabel={ext.toUpperCase()}
               metronome={{
                 muted: metronomeMuted,

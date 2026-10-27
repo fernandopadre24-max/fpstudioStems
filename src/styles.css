@@ -1060,7 +1060,16 @@ body {
   padding: 6px 12px 6px 0;
 }
 
+.lane-sub-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
 .lane-sub {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   color: var(--muted);
   font-size: 10px;
@@ -1103,6 +1112,34 @@ body {
 .lane-download:hover {
   color: var(--text);
   border-color: rgba(124, 92, 255, 0.5);
+}
+
+/* "remover": link discreto ao lado da descricao, para nao roubar largura do
+   nome da trilha (a coluna tem so 190 px). */
+.lane-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: color 0.12s ease, opacity 0.12s ease;
+}
+
+.lane-remove svg {
+  width: 11px;
+  height: 11px;
+}
+
+.lane-remove:hover {
+  color: #ff8a9b;
+  opacity: 1;
 }
 
 .lane-mix {
@@ -1176,6 +1213,12 @@ body {
 
 .selection-bar b {
   font-variant-numeric: tabular-nums;
+}
+
+/* Aviso de trilhas removidas: tom "atencao", com o botao de restaurar. */
+.removed-bar {
+  border-color: rgba(255, 92, 114, 0.35);
+  background: rgba(255, 92, 114, 0.08);
 }
 
 /* --- Busca no YouTube --- */

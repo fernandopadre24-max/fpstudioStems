@@ -5,7 +5,7 @@ import {
 } from "react";
 import type { MixerTrackId, TrackState } from "../hooks/useMixer";
 import { formatTime } from "../lib/audio";
-import { DownloadIcon, PauseIcon, PlayIcon } from "./Cards";
+import { DownloadIcon, PauseIcon, PlayIcon, TrashIcon } from "./Cards";
 import { Waveform } from "./Waveform";
 
 export interface Selection {
@@ -40,6 +40,8 @@ interface EditorProps {
   onState: (id: MixerTrackId, patch: Partial<TrackState>) => void;
   onSelection: (selection: Selection | null) => void;
   onDownload: (id: MixerTrackId) => void;
+  /** Tira a trilha do editor (e do .zip). O metronomo nao pode sair. */
+  onRemove?: (id: MixerTrackId) => void;
   downloadLabel?: string;
   /** Metronomo: estado do canal e alternador (mudo) no transporte. */
   metronome?: { muted: boolean; onToggle: () => void; bpm: number | null };
@@ -69,6 +71,7 @@ export function Editor({
   onState,
   onSelection,
   onDownload,
+  onRemove,
   downloadLabel = "WAV",
   metronome,
 }: EditorProps) {
@@ -228,10 +231,24 @@ export function Editor({
                     </button>
                   )}
                 </div>
-                {track.meta.description && (
-                  <p className="lane-sub" title={track.meta.description}>
-                    {track.meta.description}
-                  </p>
+                {(track.meta.description || (onRemove && track.meta.id !== "metronome")) && (
+                  <div className="lane-sub-row">
+                    <p className="lane-sub" title={track.meta.description}>
+                      {track.meta.description}
+                    </p>
+                    {onRemove && track.meta.id !== "metronome" && (
+                      <button
+                        type="button"
+                        className="lane-remove"
+                        onClick={() => onRemove(track.meta.id)}
+                        title={`Remover ${track.meta.label} do editor e do .zip`}
+                        aria-label={`Remover ${track.meta.label}`}
+                      >
+                        <TrashIcon />
+                        remover
+                      </button>
+                    )}
+                  </div>
                 )}
                 <div className="lane-mix">
                   <button
