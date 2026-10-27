@@ -81,6 +81,12 @@ export interface VoicePlan {
   ringDb: number;
   /** Compressao/potencia, 0..1. */
   power: number;
+  /**
+   * 0..1: quantidade de "vida" humana (vibrato que nasce depois do ataque,
+   * micro-deriva de afinacao, shimmer e sopro correlacionado). 0 no plano
+   * neutro da troca de tom, para nao modular instrumentos.
+   */
+  humanize?: number;
 }
 
 function hann(size: number): Float32Array {
@@ -330,7 +336,8 @@ export function isIdentityPlan(plan: VoicePlan): boolean {
     plan.breath < 0.01 &&
     Math.abs(plan.nasalDb) < 0.05 &&
     Math.abs(plan.ringDb) < 0.05 &&
-    plan.power < 0.01
+    plan.power < 0.01 &&
+    (plan.humanize ?? 0) < 0.01
   );
 }
 
@@ -551,6 +558,27 @@ function morphChannel(
     return seed / 4294967296;
   };
 
+  // Estado da "vida" humana. O phase vocoder, sozinho, deixa afinacao e
+  // amplitude perfeitas demais — e' isso que soa de robo. Estes valores sao
+  // suavizados no tempo para nao virar tremor.
+  const humanize = clamp(plan.humanize ?? 0, 0, 1);
+  const frameSeconds = analysisHop / sampleRate;
+  let sustain = 0;
+  let vibratoPhase = random() * wrap;
+  let vibratoRate = Math.max(3.5, plan.vibratoHz);
+  let vibratoRateTarget = vibratoRate;
+  let vibratoDepth = 1;
+  let vibratoDepthTarget = 1;
+  let driftCents = 0;
+  let driftTarget = 0;
+  let shimmer = 1;
+  let shimmerTarget = 1;
+  const breathRe = new Float32Array(half + 1);
+  const breathIm = new Float32Array(half + 1);
+  const breathReS = new Float32Array(half + 1);
+  const breathImS = new Float32Array(half + 1);
+  const breathShape = new Float32Array(half + 1);
+
   // Gate de voz: sem isso, o ganho de formante (que pode chegar a +15 dB)
   // levanta o piso de ruido nos intervalos e a voz fica chiando entre as frases.
   let gate = 1;
@@ -606,11 +634,38 @@ function morphChannel(
 
     // Sintese: aplica o ganho (formantes/brilho/EQ) e acumula a fase na
     // frequencia instantanea — com vibrato. O pitch em si vem da reamostragem.
-    const seconds = (start + size / 2) / sampleRate;
-    const vibrato = vibratoOn
-      ? Math.pow(2, (plan.vibratoCents * Math.sin(wrap * plan.vibratoHz * seconds)) / 1200)
-      : 1;
-    const breathe = breathOn && rms > noiseGate;
+    // --- vida humana -------------------------------------------------------
+    // Vibrato nasce DEPOIS do ataque (nota curta nao ganha vibrato), com taxa e
+    // profundidade que respiram; uma deriva lenta tira o carater de oscilador.
+    // Tudo escala por `humanize` e desaparece no plano neutro (troca de tom).
+    const voiced = rms > noiseGate;
+    if (!voiced || attack > 0.42) sustain = 0;
+    else sustain += frameSeconds;
+    let pitchModCents = 0;
+    if (humanize > 0) {
+      if (f % 8 === 0) {
+        vibratoRateTarget = plan.vibratoHz * (0.93 + 0.14 * random());
+        vibratoDepthTarget = 0.82 + 0.3 * random();
+      }
+      vibratoRate += (vibratoRateTarget - vibratoRate) * 0.12;
+      vibratoDepth += (vibratoDepthTarget - vibratoDepth) * 0.18;
+      if (f % 24 === 0) {
+        driftTarget = (random() * 2 - 1) * 3.5 * humanize;
+        shimmerTarget = 1 + (random() * 2 - 1) * 0.015 * humanize;
+      }
+      driftCents += (driftTarget - driftCents) * 0.05;
+      shimmer += (shimmerTarget - shimmer) * 0.06;
+      if (voiced) pitchModCents += driftCents;
+    }
+    if (vibratoOn && voiced) {
+      vibratoPhase += wrap * vibratoRate * frameSeconds;
+      const ramp = humanize > 0 ? clamp((sustain - 0.12) / 0.18, 0, 1) : 1;
+      pitchModCents +=
+        plan.vibratoCents * ramp * (humanize > 0 ? vibratoDepth : 1) * Math.sin(vibratoPhase);
+    }
+    const vibrato = pitchModCents === 0 ? 1 : Math.pow(2, pitchModCents / 1200);
+    const breathe = breathOn && voiced;
+    let breathGain = 0;
 
     if (warp) {
       frameEnvelopeDb(magnitude, envDb, envRe, envIm, envelopeCut);
@@ -632,7 +687,40 @@ function morphChannel(
       }
     }
 
-    if (f === 0 || attack > 0.5) {
+    if (breathe) {
+      // Sopro correlacionado no tempo e na frequencia (o ar do trato tem corpo);
+      // ruido branco bin a bin soa como chiado de fita.
+      for (let k = 0; k <= half; k++) {
+        breathRe[k] = breathRe[k] * 0.8 + (random() * 2 - 1) * 0.2;
+        breathIm[k] = breathIm[k] * 0.8 + (random() * 2 - 1) * 0.2;
+      }
+      for (let k = 0; k <= half; k++) {
+        const k0 = k > 0 ? k - 1 : 0;
+        const k1 = k < half ? k + 1 : half;
+        breathReS[k] = (breathRe[k0] + 2 * breathRe[k] + breathRe[k1]) * 0.25;
+        breathImS[k] = (breathIm[k0] + 2 * breathIm[k] + breathIm[k1]) * 0.25;
+      }
+      // O ar precisa PREENCHER o espectro (entre harmonicos), nao acompanhar a
+      // magnitude de cada bin — entre harmonicos ela e' zero, e o sopro sumia.
+      // Escala = nivel do quadro; forma = envelope do trato (formantes).
+      const shapeDb = warp || stats.envelopeDb.length !== half + 1 ? envDb : stats.envelopeDb;
+      let shapeMax = -1e9;
+      for (let k = 0; k <= half; k++) if (shapeDb[k] > shapeMax) shapeMax = shapeDb[k];
+      for (let k = 0; k <= half; k++) {
+        const hz = k * binHz;
+        if (hz <= 150 || hz >= 7600) {
+          breathShape[k] = 0;
+        } else {
+          // Piso de 8%: o ar e' de banda larga (nao existe so' nos formantes),
+          // mas continua realcado por eles.
+          const shape = 0.08 + 0.92 * (shapeMax > -1e8 ? Math.pow(10, (shapeDb[k] - shapeMax) / 20) : 1);
+          breathShape[k] = shape / Math.sqrt(1 + (hz / 3200) * (hz / 3200));
+        }
+      }
+      breathGain = plan.breath * rms * 900;
+    }
+
+    if (f === 0 || (attack > 0.42 && voiced)) {
       // Comeco absoluto ou ataque: a fase de sintese volta a ser a da analise.
       for (let k = 0; k <= half; k++) accumulated[k] = phase[k];
       if (f > 0) lockPhases(magnitude, phase, accumulated, half);
@@ -655,21 +743,14 @@ function morphChannel(
       } else {
         gain = gainAt(clamp(eqDb[k], -15, 15));
       }
-      const level = magnitude[k] * gain;
+      const level = magnitude[k] * gain * shimmer;
       const angle = accumulated[k];
       let r = level * Math.cos(angle);
       let i = level * Math.sin(angle);
-      if (breathe) {
-        // Ruido aspirado, moldado pelo trato vocal de destino. A escala vem da
-        // magnitude DESTE quadro (nao do envelope medio da voz): no silencio e
-        // nos trechos fracos o sopro acompanha o sinal e nao sobe o piso.
-        const hz = k * binHz;
-        if (hz > 250 && hz < 8000) {
-          const amount = plan.breath * magnitude[k] * 0.25 * random();
-          const theta = random() * wrap;
-          r += amount * Math.cos(theta);
-          i += amount * Math.sin(theta);
-        }
+      if (breathe && breathShape[k] > 0) {
+        const amount = breathGain * breathShape[k];
+        r += amount * breathReS[k];
+        i += amount * breathImS[k];
       }
       re[k] = r;
       im[k] = i;
@@ -738,36 +819,69 @@ function morphChannel(
   return out;
 }
 
-/** Distorcao harmonica no medio/agudo: a raspagem de rock, gospel e afins. */
-function applyRasp(values: Float32Array, amount: number, sampleRate: number): void {
+/** Distorcao harmonica no corpo da voz: a raspagem de rock, gospel e afins.
+ *  Gateada pelo nivel (age nos picos, nao no chiado entre frases) e limitada a
+ *  300-4500 Hz, para nao transformar os "s" em fritura. */
+function applyRasp(
+  values: Float32Array,
+  amount: number,
+  sampleRate: number,
+  reference = 0,
+): void {
   if (amount <= 0.01) return;
-  const drive = 1 + amount * 6;
+  const drive = 1 + amount * 5;
   const normalizer = Math.tanh(drive);
-  const pole = 1 / (1 + (2 * Math.PI * 800) / sampleRate);
+  const hpPole = 1 / (1 + (2 * Math.PI * 300) / sampleRate);
+  const lpAlpha = 1 - Math.exp((-2 * Math.PI * 4500) / sampleRate);
+  const attackEnv = 1 - Math.exp(-1 / (0.004 * sampleRate));
+  const releaseEnv = 1 - Math.exp(-1 / (0.09 * sampleRate));
+  const gateRef = reference > 0 ? Math.max(reference * 1.1, 0.02) : 0.08;
   let highpass = 0;
   let previous = 0;
+  let lowpass = 0;
+  let envelope = 0;
   for (let i = 0; i < values.length; i++) {
-    const shaped = Math.tanh(drive * values[i]) / normalizer;
-    highpass = pole * (highpass + shaped - previous);
+    const dry = values[i];
+    const shaped = Math.tanh(drive * dry) / normalizer;
+    highpass = hpPole * (highpass + shaped - previous);
     previous = shaped;
-    values[i] += amount * highpass * 0.5;
+    lowpass += lpAlpha * (highpass - lowpass);
+    const level = Math.abs(dry);
+    const follow = level > envelope ? attackEnv : releaseEnv;
+    envelope += follow * (level - envelope);
+    const gate = clamp(envelope / gateRef - 0.2, 0, 1);
+    values[i] = dry + amount * lowpass * 0.55 * gate * gate;
   }
 }
 
-/** Compressao simples (detector de pico, ataque rapido, release lento). */
-function applyCompressor(values: Float32Array, amount: number, sampleRate: number): void {
+/** Compressao suave (detector de pico, ataque rapido, release lento). O limiar
+ *  e' relativo ao nivel da propria voz e tem joelho: limiar absoluto pegava
+ *  todas as frases, achatava a dinamica e deixava o som "apertado". */
+function applyCompressor(
+  values: Float32Array,
+  amount: number,
+  sampleRate: number,
+  reference = 0,
+): void {
   if (amount <= 0.01) return;
-  const attack = Math.exp(-1 / (0.005 * sampleRate));
-  const release = Math.exp(-1 / (0.08 * sampleRate));
-  const threshold = 0.1;
+  const attack = Math.exp(-1 / (0.006 * sampleRate));
+  const release = Math.exp(-1 / (0.11 * sampleRate));
+  const threshold = clamp(reference > 0 ? reference * 1.9 : 0.12, 0.05, 0.42);
+  const knee = threshold * 0.3;
   const ratio = 1 + amount * 3;
-  const makeup = 1 + amount * 0.4;
+  const makeup = 1 + amount * 0.35;
   let envelope = 0;
   for (let i = 0; i < values.length; i++) {
     const level = Math.abs(values[i]);
     envelope = level > envelope ? attack * envelope + (1 - attack) * level : release * envelope + (1 - release) * level;
     let gain = 1;
-    if (envelope > threshold) gain = Math.pow(threshold / envelope, 1 - 1 / ratio);
+    if (envelope > threshold + knee) {
+      gain = Math.pow(threshold / envelope, 1 - 1 / ratio);
+    } else if (envelope > threshold - knee) {
+      const t = (envelope - (threshold - knee)) / (2 * knee);
+      const full = Math.pow(threshold / Math.max(envelope, 1e-6), 1 - 1 / ratio);
+      gain = 1 + (full - 1) * t * t;
+    }
     values[i] *= gain * makeup;
   }
 }
@@ -1011,10 +1125,10 @@ export function morphVoice(
     outRight[i] = morphed[i] - sideOut[i];
   }
 
-  applyRasp(outLeft, plan.rasp, sampleRate);
-  applyRasp(outRight, plan.rasp, sampleRate);
-  applyCompressor(outLeft, plan.power, sampleRate);
-  applyCompressor(outRight, plan.power, sampleRate);
+  applyRasp(outLeft, plan.rasp, sampleRate, stats.rms);
+  applyRasp(outRight, plan.rasp, sampleRate, stats.rms);
+  applyCompressor(outLeft, plan.power, sampleRate, stats.rms);
+  applyCompressor(outRight, plan.power, sampleRate, stats.rms);
   matchLevel(mid, outLeft, outRight);
   return { left: outLeft, right: outRight };
 }

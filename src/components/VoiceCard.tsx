@@ -153,8 +153,10 @@ export function VoiceCard({
           {open && (
             <p>
               Escolha um tipo de voz por estilo musical: o app mede a voz da musica e troca o timbre
-              (tom, formantes, brilho, vibrato) da voz principal. Roda no seu navegador, sem baixar
-              modelo extra. Recurso em fase experimental: o resultado varia conforme a gravacao.
+              (tom, formantes, brilho, vibrato) da voz principal. O vibrato entra depois do ataque da
+              nota, com taxa e profundidade que variam, e a afinacao ganha micro-deriva — para nao
+              soar sintetico. Roda no seu navegador, sem baixar modelo extra. Recurso em fase
+              experimental: o resultado varia conforme a gravacao.
             </p>
           )}
         </div>

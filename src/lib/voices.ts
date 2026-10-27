@@ -517,6 +517,7 @@ export function resolveVoicePlan(
     nasalDb: 4 * profile.nasal * intensity,
     ringDb: profile.ring * intensity,
     power: profile.power * intensity,
+    humanize: intensity,
   };
 }
 
