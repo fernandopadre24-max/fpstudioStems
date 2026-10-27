@@ -584,6 +584,36 @@ body {
   cursor: default;
 }
 
+/* Opcao de separar voz principal + backing: ocupa a linha inteira e explica
+   o custo (download do modelo KARA 2) em letra menor. */
+.vocal-split {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin: 0 0 16px;
+}
+
+.vocal-split input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.vocal-split-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vocal-split-text b {
+  font-weight: 600;
+}
+
+.vocal-split-text small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .progress-note {
   margin-top: 10px;
   color: #ffd28f;

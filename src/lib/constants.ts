@@ -299,6 +299,19 @@ export function getPreset(id: StemPresetId): StemPreset {
   return preset;
 }
 
+/**
+ * Trilhas finais de um preset, com a divisao de voz/backing ligada ou
+ * desligada. A divisao e opcional: quando ligada, os vocais viram voz
+ * principal + backing (modelo KARA 2); quando desligada, sai uma trilha de
+ * vocais so. Os dois casos ocupam o mesmo lugar na lista, no fim.
+ */
+export function presetStemIds(preset: StemPreset, splitVocals: boolean): StemId[] {
+  const base = preset.stems.filter(
+    (id) => id !== "vocals" && id !== "leadVocal" && id !== "backingVocal",
+  );
+  return splitVocals ? [...base, "leadVocal", "backingVocal"] : [...base, "vocals"];
+}
+
 export interface ModelAsset {
   id: string;
   url: string;

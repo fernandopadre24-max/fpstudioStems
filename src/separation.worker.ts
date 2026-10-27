@@ -3,6 +3,7 @@ import {
   BACKING_VOCAL_MODEL,
   getModel,
   getPreset,
+  presetStemIds,
   SAMPLE_RATE,
   type Backend,
   type ModelAsset,
@@ -304,6 +305,7 @@ async function separate(
   right: Float32Array,
   backend: Backend,
   preset: StemPreset,
+  splitVocals: boolean,
 ): Promise<void> {
   cancelled = false;
   if (backend === "webgpu") webgpuUsable = true;
@@ -313,7 +315,7 @@ async function separate(
   try {
     const handle = await getSession(model, backend);
     used = handle.backend;
-    await separateWithSession(handle.session, left, right, model, preset, used);
+    await separateWithSession(handle.session, left, right, model, preset, used, splitVocals);
   } catch (error) {
     if (cancelled) {
       post({ type: "cancelled" });
@@ -330,7 +332,7 @@ async function separate(
       reason: describeError(error),
     });
     const handle = await getSession(model, "wasm");
-    await separateWithSession(handle.session, left, right, model, preset, "wasm");
+    await separateWithSession(handle.session, left, right, model, preset, "wasm", splitVocals);
   }
 }
 
@@ -355,6 +357,7 @@ async function separateWithSession(
   model: StemModelMeta,
   preset: StemPreset,
   backend: "webgpu" | "wasm",
+  splitVocals: boolean,
 ): Promise<void> {
   const startedAt = performance.now();
 
@@ -443,9 +446,10 @@ async function separateWithSession(
     }
   }
 
-  // Vocais -> voz principal + backing (modelo UVR-MDX-NET KARA 2).
+  // Vocais -> voz principal + backing (modelo UVR-MDX-NET KARA 2), quando a
+  // pessoa pediu a divisao. Sem a opcao, os vocais seguem inteiros.
   const vocals = get("vocals");
-  if (preset.vocals && vocals) {
+  if (splitVocals && vocals) {
     post({
       type: "separation-note",
       message: "Separando voz principal do backing (modelo extra)...",
@@ -513,8 +517,12 @@ async function separateWithSession(
     }
   }
 
+  // Lista final: as trilhas do preset com voz/backing divididos apenas se a
+  // divisao realmente aconteceu. Se o modelo KARA falhar, os vocais voltam
+  // inteiros em vez de sumirem.
+  const splitDone = splitVocals && produced.has("leadVocal") && produced.has("backingVocal");
   const payloads: StemResultPayload[] = [];
-  for (const id of preset.stems) {
+  for (const id of presetStemIds(preset, splitDone)) {
     const stem = produced.get(id);
     if (!stem) continue;
     payloads.push({
@@ -554,7 +562,13 @@ ctx.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     }
 
     if (message.type === "separate") {
-      await separate(message.left, message.right, message.backend, getPreset(message.preset));
+      await separate(
+        message.left,
+        message.right,
+        message.backend,
+        getPreset(message.preset),
+        message.splitVocals,
+      );
     }
   } catch (error) {
     post({

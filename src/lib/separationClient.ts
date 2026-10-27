@@ -49,8 +49,9 @@ export class SeparationEngine {
     right: Float32Array,
     backend: Backend,
     preset: StemPresetId,
+    splitVocals: boolean,
   ) {
-    this.send({ type: "separate", left, right, backend, preset });
+    this.send({ type: "separate", left, right, backend, preset, splitVocals });
   }
 
   cancel() {

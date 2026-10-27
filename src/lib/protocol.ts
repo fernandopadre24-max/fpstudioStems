@@ -9,6 +9,8 @@ export type WorkerRequest =
       right: Float32Array;
       backend: Backend;
       preset: StemPresetId;
+      /** Opcao do usuario: divide os vocais em voz principal + backing. */
+      splitVocals: boolean;
     }
   | { type: "cancel" };
 

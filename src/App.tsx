@@ -29,9 +29,11 @@ import {
 } from "./lib/analysis";
 import { cifraToText, fetchCifra, type CifraQuery, type CifraResult } from "./lib/chords";
 import {
+  BACKING_VOCAL_MODEL,
   DEFAULT_WHISPER_ID,
   getModel,
   getPreset,
+  presetStemIds,
   SAMPLE_RATE,
   STEM_BY_ID,
   STEM_PRESETS,
@@ -255,6 +257,10 @@ export default function App() {
   const [separationProgress, setSeparationProgress] = useState<SeparationProgress | null>(null);
   const [backendChoice, setBackendChoice] = useState<Backend>("auto");
   const [presetChoice, setPresetChoice] = useState<StemPresetId>("4");
+  // Divisao de voz principal + backing: opcional e independente do preset.
+  // null = segue o padrao do preset (8/10/12 ja dividem); true/false = escolha
+  // manual, que vale ate trocar de preset ou de musica.
+  const [splitVocalsOverride, setSplitVocalsOverride] = useState<boolean | null>(null);
   // Sugestao de quantas trilhas separar, medida no proprio audio (lib/stemHint).
   const [presetTouched, setPresetTouched] = useState(false);
   const stemHint = useMemo(() => {
@@ -269,6 +275,7 @@ export default function App() {
   // escolha ate trocar de musica.
   useEffect(() => {
     setPresetTouched(false);
+    setSplitVocalsOverride(null);
   }, [decoded]);
   useEffect(() => {
     if (!stemHint || presetTouched) return;
@@ -970,6 +977,9 @@ export default function App() {
 
   const preset = getPreset(presetChoice);
   const model = getModel(preset.model);
+  // Voz e backing: por padrao segue o preset; a escolha manual manda.
+  const splitVocals = splitVocalsOverride ?? preset.vocals;
+  const stemCount = presetStemIds(preset, splitVocals).length;
 
   useEffect(() => {
     setModelStatus("unknown");
@@ -1078,8 +1088,14 @@ export default function App() {
     setActivePlayback(null);
     setSelection(null);
     setPhase("separating");
-    engineRef.current?.separate(decoded.left, decoded.right, backendChoice, presetChoice);
-  }, [backendChoice, decoded, presetChoice]);
+    engineRef.current?.separate(
+      decoded.left,
+      decoded.right,
+      backendChoice,
+      presetChoice,
+      splitVocals,
+    );
+  }, [backendChoice, decoded, presetChoice, splitVocals]);
 
   const cancelSeparation = useCallback(() => {
     engineRef.current?.cancel();
@@ -1437,7 +1453,13 @@ export default function App() {
       "drums",
     ];
     const ready = new Set((results ?? []).map((stem) => String(stem.id)));
-    const ordered = preset.stems
+    // Trilhas do preset com a divisao de voz/backing atual + o que ja existe
+    // separado (uma separacao antiga pode ter outras trilhas).
+    const available: StemId[] = presetStemIds(preset, splitVocals);
+    for (const stem of results ?? []) {
+      if (!available.includes(stem.id)) available.push(stem.id);
+    }
+    const ordered = available
       .filter((id) => !removedStems.includes(id))
       .sort((a, b) => {
         const ia = priority.indexOf(a);
@@ -1450,7 +1472,7 @@ export default function App() {
     });
     if (decoded) options.push({ id: "original", label: "Música original (mix)" });
     return options;
-  }, [decoded, preset, results, removedStems]);
+  }, [decoded, preset, results, removedStems, splitVocals]);
 
   useEffect(() => {
     if (scoreSources.length === 0) return;
@@ -2354,11 +2376,33 @@ export default function App() {
         {decoded && phase !== "decoding" && (
           <section className="panel controls-panel">
             <div className="section-head">
-              <h2>Separar em {preset.stems.length} trilhas</h2>
+              <h2>Separar em {stemCount} trilhas</h2>
               <p>
-                {preset.description} O processamento acontece inteiramente na sua maquina.
+                {preset.description}{" "}
+                {splitVocals !== preset.vocals &&
+                  (splitVocals
+                    ? "Com a divisão ligada, os vocais saem em voz principal + backing."
+                    : "Com a divisão desligada, os vocais saem em uma trilha só.")}{" "}
+                O processamento acontece inteiramente na sua maquina.
               </p>
             </div>
+
+            <label className="field-toggle vocal-split">
+              <input
+                type="checkbox"
+                checked={splitVocals}
+                onChange={(event) => setSplitVocalsOverride(event.target.checked)}
+                disabled={phase === "separating"}
+              />
+              <span className="vocal-split-text">
+                <b>Separar voz principal e backing vocal</b>
+                <small>
+                  Opcional: divide os vocais em duas trilhas com o modelo KARA 2 (~
+                  {Math.round(BACKING_VOCAL_MODEL.sizeBytes / (1024 * 1024))} MB na primeira
+                  vez).
+                </small>
+              </span>
+            </label>
 
             <div className="controls-row">
               <label className="field">
@@ -2368,6 +2412,7 @@ export default function App() {
                   onChange={(event) => {
                     setPresetTouched(true);
                     setPresetChoice(event.target.value as StemPresetId);
+                    setSplitVocalsOverride(null);
                   }}
                   disabled={phase === "separating"}
                 >
@@ -2430,6 +2475,9 @@ export default function App() {
               <p className="stem-hint">
                 <span className="stem-hint-tag">Sugestão</span>
                 {stemHint.count} trilhas para esta música — {stemHint.reason}.
+                {splitVocals &&
+                  !preset.vocals &&
+                  " A divisão de voz e backing soma 2 trilhas (voz principal + backing)."}
                 {presetChoice !== stemHint.preset && " Você escolheu outra quantidade."}
               </p>
             )}
