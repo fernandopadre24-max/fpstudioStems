@@ -31,7 +31,7 @@ const TILT_HIGH_HZ = 8000;
  * senao os "S" viram assobio de helio. O corte e complementar, entao a soma das
  * duas bandas devolve o sinal original exatamente.
  */
-const SIBILANCE_HZ = 6500;
+const SIBILANCE_HZ = 4200;
 
 export type VoiceSex = "feminina" | "masculina" | "media";
 
@@ -129,7 +129,18 @@ function smoothEnvelope(values: Float32Array): void {
   }
   fft(re, im);
   for (let q = 0; q < size; q++) re[q] /= size;
-  for (let q = CEPSTRUM_CUT + 1; q < size - CEPSTRUM_CUT; q++) re[q] = 0;
+  // Lifter com transição suave (half-cosine): evita ondulações de Gibbs no espectro
+  const cut = CEPSTRUM_CUT;
+  const taper = Math.round(cut * 0.55);
+  for (let q = 0; q <= half; q++) {
+    let w = 1;
+    if (q > cut) w = 0;
+    else if (q > taper) {
+      w = 0.5 * (1 + Math.cos((Math.PI * (q - taper)) / (cut - taper)));
+    }
+    re[q] *= w;
+    if (q > 0 && q < half) re[size - q] *= w;
+  }
   im.fill(0);
   fft(re, im);
   for (let k = 0; k <= half && k < values.length; k++) values[k] = re[k];
@@ -406,17 +417,27 @@ function frameEnvelopeDb(
   im.fill(0);
   fft(re, im);
   for (let q = 0; q < size; q++) re[q] /= size;
-  for (let q = cut + 1; q < size - cut; q++) re[q] = 0;
+  // Transição suave (half-cosine) para evitar ripples de Gibbs
+  const taper = Math.round(cut * 0.55);
+  for (let q = 0; q <= half; q++) {
+    let w = 1;
+    if (q > cut) w = 0;
+    else if (q > taper) {
+      w = 0.5 * (1 + Math.cos((Math.PI * (q - taper)) / (cut - taper)));
+    }
+    re[q] *= w;
+    if (q > 0 && q < half) re[size - q] *= w;
+  }
   im.fill(0);
   fft(re, im);
   for (let k = 0; k <= half; k++) out[k] = re[k];
 }
 
 /**
- * Identity phase locking (Laroche & Dolson): dentro da regiao de cada pico, a
- * fase de sintese dos bins vizinhos acompanha a do pico, mantendo a diferenca
- * de fase medida na analise. Sem isso o overlap-add soma senoides com fases
- * arbitrarias e sobra o timbre "liquido"/metalico classico do phase vocoder.
+ * Identity phase locking (Laroche & Dolson) com bacias de atração por vales
+ * espectrais: cada pico atrai os bins até o mínimo de magnitude entre ele e o
+ * pico vizinho. Sem isso, dividir pelo ponto médio quebrava a coerência do lobo
+ * harmônico e criava o som oco/metálico ("phasiness") de vocoder.
  */
 function lockPhases(
   magnitude: Float32Array,
@@ -438,13 +459,33 @@ function lockPhases(
       peaks.push(k);
     }
   }
+  if (peaks.length === 0) return;
+
+  // Fronteiras nos vales de magnitude (mínimo local entre picos adjacentes):
+  const boundaries = new Int32Array(peaks.length + 1);
+  boundaries[0] = 0;
+  for (let i = 0; i < peaks.length - 1; i++) {
+    const p1 = peaks[i];
+    const p2 = peaks[i + 1];
+    let minMag = Infinity;
+    let minK = (p1 + p2) >> 1;
+    for (let k = p1; k <= p2; k++) {
+      if (magnitude[k] < minMag) {
+        minMag = magnitude[k];
+        minK = k;
+      }
+    }
+    boundaries[i + 1] = minK;
+  }
+  boundaries[peaks.length] = half + 1;
+
   for (let i = 0; i < peaks.length; i++) {
     const peak = peaks[i];
-    const from = i === 0 ? 0 : (peaks[i - 1] + peak) >> 1;
-    const to = i === peaks.length - 1 ? half : (peak + peaks[i + 1]) >> 1;
+    const from = boundaries[i];
+    const to = boundaries[i + 1];
     const base = synthesisPhase[peak];
     const offset = analysisPhase[peak];
-    for (let k = from; k < to; k++) {
+    for (let k = from; k < to && k <= half; k++) {
       if (k === peak) continue;
       synthesisPhase[k] = base + (analysisPhase[k] - offset);
     }
@@ -616,19 +657,22 @@ function morphChannel(
       previousPhase[k] = p;
     }
 
-    // Ataque: reinicia a fase na fase medida. Sem isso o OLA continua a fase
-    // do quadro anterior e o transiente (consoante, ataque de nota) chega
-    // borrado, com um "pre-eco" de 20-40 ms.
+    // Ataque e transientes: foco nas frequencias onde consoantes e ataques vocais
+    // realmente acontecem (> 1000 Hz). Com peso espectral e limiar
+    // adaptativo, consoantes e inicios de nota mantem definicao imediata em vez
+    // de sofrerem pre-eco de 20-40 ms.
     let attack = 0;
     if (f > 0) {
-      let diff = 0;
-      let sum = 0;
+      let hfDiff = 0;
+      let hfSum = 0;
       for (let k = 0; k <= half; k++) {
+        const hz = k * binHz;
+        const weight = hz > 1200 ? (hz < 8000 ? 2.5 : 1.2) : 0.8;
         const delta = magnitude[k] - previousMagnitude[k];
-        if (delta > 0) diff += delta;
-        sum += magnitude[k];
+        if (delta > 0) hfDiff += delta * weight;
+        hfSum += magnitude[k] * weight;
       }
-      attack = diff / (sum + 1e-9);
+      attack = hfSum > 1e-7 ? hfDiff / hfSum : 0;
     }
     previousMagnitude.set(magnitude);
 
@@ -639,31 +683,37 @@ function morphChannel(
     // profundidade que respiram; uma deriva lenta tira o carater de oscilador.
     // Tudo escala por `humanize` e desaparece no plano neutro (troca de tom).
     const voiced = rms > noiseGate;
-    if (!voiced || attack > 0.42) sustain = 0;
+    const isTransient = attack > 0.19 && (voiced || rms > noiseGate * 4);
+    if (!voiced || isTransient) sustain = 0;
     else sustain += frameSeconds;
     let pitchModCents = 0;
     if (humanize > 0) {
       if (f % 8 === 0) {
-        vibratoRateTarget = plan.vibratoHz * (0.93 + 0.14 * random());
-        vibratoDepthTarget = 0.82 + 0.3 * random();
+        vibratoRateTarget = plan.vibratoHz * (0.94 + 0.12 * random());
+        vibratoDepthTarget = 0.85 + 0.28 * random();
       }
       vibratoRate += (vibratoRateTarget - vibratoRate) * 0.12;
       vibratoDepth += (vibratoDepthTarget - vibratoDepth) * 0.18;
-      if (f % 24 === 0) {
-        driftTarget = (random() * 2 - 1) * 3.5 * humanize;
-        shimmerTarget = 1 + (random() * 2 - 1) * 0.015 * humanize;
+      if (f % 16 === 0) {
+        driftTarget = (random() * 2 - 1) * 4.2 * humanize;
+        shimmerTarget = 1 + (random() * 2 - 1) * 0.02 * humanize;
       }
-      driftCents += (driftTarget - driftCents) * 0.05;
-      shimmer += (shimmerTarget - shimmer) * 0.06;
+      driftCents += (driftTarget - driftCents) * 0.08;
+      shimmer += (shimmerTarget - shimmer) * 0.08;
       if (voiced) pitchModCents += driftCents;
     }
+    const ramp = humanize > 0 ? clamp((sustain - 0.14) / 0.22, 0, 1) : 1;
     if (vibratoOn && voiced) {
       vibratoPhase += wrap * vibratoRate * frameSeconds;
-      const ramp = humanize > 0 ? clamp((sustain - 0.12) / 0.18, 0, 1) : 1;
       pitchModCents +=
         plan.vibratoCents * ramp * (humanize > 0 ? vibratoDepth : 1) * Math.sin(vibratoPhase);
     }
     const vibrato = pitchModCents === 0 ? 1 : Math.pow(2, pitchModCents / 1200);
+    const vibratoShimmer =
+      vibratoOn && voiced && humanize > 0
+        ? 1 + 0.04 * ramp * Math.sin(vibratoPhase - 0.3)
+        : 1;
+    const totalShimmer = shimmer * vibratoShimmer;
     const breathe = breathOn && voiced;
     let breathGain = 0;
 
@@ -678,12 +728,11 @@ function morphChannel(
       // sem "wow" de fita).
       const formant = plan.formantRatio / vibrato;
       for (let k = 0; k <= half; k++) {
-        let db = eqDb[k];
-        if (magnitude[k] > floorLevel) {
-          db += interpolate(envDb, (k * rate) / formant) - envDb[k];
-        }
-        // Suaviza no tempo (~30 ms) para o ganho nao piscar a cada quadro.
-        smoothDb[k] += (db - smoothDb[k]) * 0.35;
+        // Ponderacao continua pelo SNR para nao dar saltos abruptos (musical noise):
+        const snr = magnitude[k] / (magnitude[k] + floorLevel * 1.5 + 1e-7);
+        const formantDelta = interpolate(envDb, (k * rate) / formant) - envDb[k];
+        const db = eqDb[k] + formantDelta * snr;
+        smoothDb[k] += (db - smoothDb[k]) * 0.38;
       }
     }
 
@@ -720,13 +769,13 @@ function morphChannel(
       breathGain = plan.breath * rms * 900;
     }
 
-    if (f === 0 || (attack > 0.42 && voiced)) {
-      // Comeco absoluto ou ataque: a fase de sintese volta a ser a da analise.
+    if (f === 0 || isTransient) {
+      // Comeco absoluto ou ataque consonantal: a fase de sintese volta a ser a da analise.
       for (let k = 0; k <= half; k++) accumulated[k] = phase[k];
       if (f > 0) lockPhases(magnitude, phase, accumulated, half);
     } else {
       for (let k = 0; k <= half; k++) {
-        accumulated[k] += advance * interpolate(frequency, k) * vibrato;
+        accumulated[k] += advance * frequency[k] * vibrato;
       }
       lockPhases(magnitude, phase, accumulated, half);
     }
@@ -735,15 +784,13 @@ function morphChannel(
       if (warp) {
         gain = gainAt(clamp(smoothDb[k], -15, 15));
         if (gain > 1) {
-          // Nunca realca o que esta abaixo do piso do proprio quadro (ruido
-          // entre harmonicos e silencio), nem quando a voz esta fraca.
-          if (magnitude[k] <= floorLevel) gain = 1;
-          else if (gate < 1) gain = 1 + (gain - 1) * gate;
+          const binGate = clamp(magnitude[k] / (floorLevel * 2 + 1e-7), 0, 1) * gate;
+          gain = 1 + (gain - 1) * binGate;
         }
       } else {
         gain = gainAt(clamp(eqDb[k], -15, 15));
       }
-      const level = magnitude[k] * gain * shimmer;
+      const level = magnitude[k] * gain * totalShimmer;
       const angle = accumulated[k];
       let r = level * Math.cos(angle);
       let i = level * Math.sin(angle);
@@ -886,6 +933,60 @@ function applyCompressor(
   }
 }
 
+/**
+ * Adiciona calor e presenca organica (harmonicos pares e impulsionamento sutil de corpo)
+ * na faixa media vocal (180 Hz a 3800 Hz), retirando a aspereza e frieza digital.
+ */
+function applyVocalWarmth(
+  values: Float32Array,
+  sampleRate: number,
+  amount = 0.4,
+): void {
+  if (amount <= 0.01) return;
+  const hpPole = 1 / (1 + (2 * Math.PI * 180) / sampleRate);
+  const lpAlpha = 1 - Math.exp((-2 * Math.PI * 3800) / sampleRate);
+  let hp = 0;
+  let prev = 0;
+  let lp = 0;
+  const mix = amount * 0.24;
+  for (let i = 0; i < values.length; i++) {
+    const x = values[i];
+    hp = hpPole * (hp + x - prev);
+    prev = x;
+    lp += lpAlpha * (hp - lp);
+    // Saturacao assimetrica suave que gera harmonicos pares musicais
+    const sat = lp + 0.32 * (lp * lp - 0.04 * lp * lp * lp);
+    values[i] = x + mix * (sat - lp);
+  }
+}
+
+/**
+ * De-esser suave para amaciar sibilantes e atrito excessivo nos agudos (5.2 - 9.5 kHz)
+ * preservando a articulacao e nitidez natural das consoantes.
+ */
+function applyDeEsser(values: Float32Array, sampleRate: number): void {
+  const lpDetector = 1 - Math.exp((-2 * Math.PI * 9500) / sampleRate);
+  const hpPole = 1 / (1 + (2 * Math.PI * 5200) / sampleRate);
+  const attack = Math.exp(-1 / (0.002 * sampleRate));
+  const release = Math.exp(-1 / (0.045 * sampleRate));
+  let hp = 0;
+  let prev = 0;
+  let lp = 0;
+  let env = 0;
+  for (let i = 0; i < values.length; i++) {
+    const x = values[i];
+    hp = hpPole * (hp + x - prev);
+    prev = x;
+    lp += lpDetector * (hp - lp);
+    const level = Math.abs(lp);
+    env = level > env ? attack * env + (1 - attack) * level : release * env + (1 - release) * level;
+    if (env > 0.07) {
+      const reduction = clamp(1 - (env - 0.07) * 1.6, 0.45, 1);
+      values[i] = x - lp * (1 - reduction);
+    }
+  }
+}
+
 /** Ceifa picos suaves: um transiente nao pode derrubar o nivel da voz inteira. */
 function softLimit(values: Float32Array, ceiling: number): void {
   const knee = 0.7;
@@ -1017,10 +1118,12 @@ export function morphVoice(
     power: 0,
   };
 
-  // So separa as sibilantes quando o tom muda: sem mudanca de pitch nao ha
-  // risco de "s" saltando de registro, e o corte vira um ponto de costura
-  // desnecessario num sinal que vai ser esticado do mesmo jeito.
-  const splitSibilance = Math.abs(plan.pitchRatio - 1) > 1e-3;
+  // Separa as sibilantes quando o tom, formantes ou brilho mudam:
+  // protege os "s" e consoantes fricativas de ficarem distorcidos ou estridentes.
+  const splitSibilance =
+    Math.abs(plan.pitchRatio - 1) > 1e-3 ||
+    Math.abs(plan.formantRatio - 1) > 0.03 ||
+    Math.abs(plan.tiltDelta) > 0.5;
 
   // Cada passo reporta uma fatia do progresso (medio primeiro, depois o que e
   // so esticar), para a barra andar de ponta a ponta sem pular. Sem andamento
@@ -1129,6 +1232,13 @@ export function morphVoice(
   applyRasp(outRight, plan.rasp, sampleRate, stats.rms);
   applyCompressor(outLeft, plan.power, sampleRate, stats.rms);
   applyCompressor(outRight, plan.power, sampleRate, stats.rms);
+  // Calor organico (harmonicos pares de corpo vocal para soar humano)
+  const warmth = (plan.humanize ?? 1) * 0.45;
+  applyVocalWarmth(outLeft, sampleRate, warmth);
+  applyVocalWarmth(outRight, sampleRate, warmth);
+  // De-esser dinamico para amaciar sibilantes e agudos estridentes
+  applyDeEsser(outLeft, sampleRate);
+  applyDeEsser(outRight, sampleRate);
   matchLevel(mid, outLeft, outRight);
   return { left: outLeft, right: outRight };
 }
