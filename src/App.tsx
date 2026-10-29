@@ -1882,16 +1882,11 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M4 12v2M8 8v10M12 4v16M16 8v10M20 12v2"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </span>
+          <img
+            src="/fpstudio-logo.jpg"
+            alt="FP Studio Logo"
+            className="brand-logo"
+          />
           <div>
             <h1>
               FPStudio - Stems v.0.1 - 2027
