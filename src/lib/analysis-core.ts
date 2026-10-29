@@ -18,6 +18,16 @@ export interface TrackAnalysis {
 }
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const NOTE_NAMES_FLAT = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+
+/** Tonalidades que preferem nomes com bemol (F, Bb, Eb, Ab, Db, Gb e menores). */
+function prefersFlats(key?: { tonic: number; mode: "major" | "minor" } | null): boolean {
+  if (!key) return false;
+  const tonic = ((key.tonic % 12) + 12) % 12;
+  const flatKeys =
+    key.mode === "major" ? [5, 10, 3, 8, 1, 6] : [2, 7, 0, 5, 10, 3];
+  return flatKeys.includes(tonic);
+}
 
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
@@ -499,58 +509,96 @@ export interface ChordSegment {
   chord: string;
 }
 
-const CHORD_SUFFIXES: { suffix: string; intervals: number[] }[] = [
-  { suffix: "", intervals: [0, 4, 7] },
-  { suffix: "m", intervals: [0, 3, 7] },
-];
+/** Grade de tempos conhecida, para alinhar as bordas dos acordes ao pulso. */
+export interface ChordTiming {
+  bpm?: number;
+  beatOffset?: number;
+}
 
-function buildChordTemplates(key?: { tonic: number; mode: "major" | "minor" }): {
+interface ChordTemplate {
   name: string;
   vector: Float32Array;
-}[] {
-  const roots: { root: number; suffix: string }[] = [];
+  /** Espectro esperado no grave: fundamental forte, quinta fraca. O baixo e
+   * quem diz a fundamental — sem peso no grave, acordes em inversao (G/B) e
+   * notas de passagem trocam o nome do acorde. */
+  bass: Float32Array;
+}
+
+function normalizedVector(values: number[]): Float32Array {
+  const vector = new Float32Array(values.length);
+  let norm = 0;
+  for (let i = 0; i < values.length; i++) {
+    vector[i] = values[i];
+    norm += values[i] * values[i];
+  }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < values.length; i++) vector[i] /= norm;
+  return vector;
+}
+
+function buildChordTemplates(key?: { tonic: number; mode: "major" | "minor" }): ChordTemplate[] {
+  const templates: ChordTemplate[] = [];
+  const seen = new Set<string>();
+  const nameDefault = (root: number) => NOTE_NAMES[((root % 12) + 12) % 12];
+  const push = (
+    root: number,
+    minor: boolean,
+    nameOf: (root: number) => string = nameDefault,
+  ) => {
+    const name = nameOf(root) + (minor ? "m" : "");
+    if (seen.has(name)) return;
+    seen.add(name);
+    const intervals = minor ? [0, 3, 7] : [0, 4, 7];
+    const vectorValues = new Array<number>(12).fill(0);
+    for (const interval of intervals) {
+      const pc = (((root + interval) % 12) + 12) % 12;
+      vectorValues[pc] = 1;
+    }
+    const bassValues = new Array<number>(12).fill(0);
+    bassValues[((root % 12) + 12) % 12] = 1;
+    const fifth = (((root + 7) % 12) + 12) % 12;
+    if (fifth !== ((root % 12) + 12) % 12) bassValues[fifth] = 0.4;
+    templates.push({
+      name,
+      vector: normalizedVector(vectorValues),
+      bass: normalizedVector(bassValues),
+    });
+  };
+
   if (key) {
     const tonic = ((key.tonic % 12) + 12) % 12;
+    const flat = prefersFlats(key);
+    const nameOf = (root: number) => (flat ? NOTE_NAMES_FLAT : NOTE_NAMES)[((root % 12) + 12) % 12];
     if (key.mode === "major") {
-      roots.push(
-        { root: tonic, suffix: "" },
-        { root: (tonic + 2) % 12, suffix: "m" },
-        { root: (tonic + 4) % 12, suffix: "m" },
-        { root: (tonic + 5) % 12, suffix: "" },
-        { root: (tonic + 7) % 12, suffix: "" },
-        { root: (tonic + 9) % 12, suffix: "m" },
-      );
+      // Diatonicos: I ii iii IV V vi.
+      push(tonic, false, nameOf);
+      push(tonic + 2, true, nameOf);
+      push(tonic + 4, true, nameOf);
+      push(tonic + 5, false, nameOf);
+      push(tonic + 7, false, nameOf);
+      push(tonic + 9, true, nameOf);
+      // Emprestados comuns na musica popular: bVII, bVI e bIII (maiores),
+      // mais II maior (V/V) e v menor (dominante menor emprestado).
+      push(tonic + 10, false, nameOf);
+      push(tonic + 8, false, nameOf);
+      push(tonic + 3, false, nameOf);
+      push(tonic + 2, false, nameOf);
+      push(tonic + 7, true, nameOf);
     } else {
-      roots.push(
-        { root: tonic, suffix: "m" },
-        { root: (tonic + 3) % 12, suffix: "" },
-        { root: (tonic + 5) % 12, suffix: "m" },
-        { root: (tonic + 7) % 12, suffix: "m" },
-        { root: (tonic + 7) % 12, suffix: "" },
-        { root: (tonic + 8) % 12, suffix: "" },
-        { root: (tonic + 10) % 12, suffix: "" },
-      );
+      // Menor natural + V maior (menor harmonica) e v menor.
+      push(tonic, true, nameOf);
+      push(tonic + 3, false, nameOf);
+      push(tonic + 5, true, nameOf);
+      push(tonic + 7, false, nameOf);
+      push(tonic + 8, false, nameOf);
+      push(tonic + 10, false, nameOf);
+      push(tonic + 7, true, nameOf);
     }
   } else {
     for (let root = 0; root < 12; root++) {
-      for (const { suffix } of CHORD_SUFFIXES) roots.push({ root, suffix });
+      push(root, false, undefined);
+      push(root, true, undefined);
     }
-  }
-
-  const templates: { name: string; vector: Float32Array }[] = [];
-  const seen = new Set<string>();
-  for (const { root, suffix } of roots) {
-    const name = NOTE_NAMES[root] + suffix;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const intervals = suffix === "m" ? [0, 3, 7] : [0, 4, 7];
-    const vector = new Float32Array(12);
-    for (const interval of intervals) vector[(root + interval) % 12] = 1;
-    let norm = 0;
-    for (let i = 0; i < 12; i++) norm += vector[i] * vector[i];
-    norm = Math.sqrt(norm) || 1;
-    for (let i = 0; i < 12; i++) vector[i] /= norm;
-    templates.push({ name, vector });
   }
   return templates;
 }
@@ -618,11 +666,15 @@ function mergeChordSegments(segments: ChordSegment[], minDuration: number): Chor
   return cleaned;
 }
 
+/** Peso do croma grave na decisao: o baixo define a fundamental do acorde. */
+const BASS_WEIGHT = 0.65;
+
 function classifyLabels(
   smoothed: Float32Array[],
+  smoothedBass: Float32Array[],
   energies: Float32Array,
   gate: number,
-  templates: { name: string; vector: Float32Array }[],
+  templates: ChordTemplate[],
   windowFrames: number,
 ): number[] {
   const frames = smoothed.length;
@@ -630,14 +682,16 @@ function classifyLabels(
   for (let f = 0; f < frames; f++) {
     if (energies[f] < gate) continue;
     const chroma = smoothed[f];
+    const bassChroma = smoothedBass[f];
     let bestTemplate = -1;
     let bestSim = -Infinity;
     for (let t = 0; t < templates.length; t++) {
-      const vector = templates[t].vector;
-      let dot = 0;
-      for (let i = 0; i < 12; i++) dot += chroma[i] * vector[i];
-      if (dot > bestSim) {
-        bestSim = dot;
+      const template = templates[t];
+      let similarity = 0;
+      for (let i = 0; i < 12; i++) similarity += chroma[i] * template.vector[i];
+      for (let i = 0; i < 12; i++) similarity += BASS_WEIGHT * bassChroma[i] * template.bass[i];
+      if (similarity > bestSim) {
+        bestSim = similarity;
         bestTemplate = t;
       }
     }
@@ -648,7 +702,7 @@ function classifyLabels(
 
 function labelsToSegments(
   filtered: number[],
-  templates: { name: string; vector: Float32Array }[],
+  templates: ChordTemplate[],
   hop: number,
   sampleRate: number,
 ): ChordSegment[] {
@@ -669,33 +723,85 @@ function labelsToSegments(
   return segments;
 }
 
-function diatonicChordNames(tonic: number, mode: "major" | "minor"): Set<string> {
-  const degrees =
-    mode === "major"
-      ? [
-          { r: 0, s: "" },
-          { r: 2, s: "m" },
-          { r: 4, s: "m" },
-          { r: 5, s: "" },
-          { r: 7, s: "" },
-          { r: 9, s: "m" },
-        ]
-      : [
-          { r: 0, s: "m" },
-          { r: 3, s: "" },
-          { r: 5, s: "m" },
-          { r: 7, s: "m" },
-          { r: 7, s: "" },
-          { r: 8, s: "" },
-          { r: 10, s: "" },
-        ];
-  const set = new Set<string>();
-  for (const { r, s } of degrees) set.add(NOTE_NAMES[(tonic + r) % 12] + s);
-  return set;
+function applyChromaNorm(chroma: Float32Array): Float32Array {
+  let norm = 0;
+  for (let i = 0; i < 12; i++) norm += chroma[i];
+  if (norm > 0) for (let i = 0; i < 12; i++) chroma[i] /= norm;
+  return chroma;
+}
+
+interface ChordIdentity {
+  root: number;
+  minor: boolean;
+}
+
+function chordIdentity(name: string): ChordIdentity | null {
+  for (let len = 2; len >= 1; len--) {
+    const prefix = name.slice(0, len);
+    const index = NOTE_NAMES.indexOf(prefix);
+    if (index >= 0) return { root: index, minor: name.slice(len) === "m" };
+  }
+  return null;
+}
+
+/**
+ * Quanto cada intervalo relativo a tonalidade vale para a pontuacao daquele
+ * candidato a tonalidade: diatonicos (I .. vi) pesam 1, emprestados comuns
+ * (bIII, bVI, bVII) pesam ~0.35 e notas fora da escala quase nada. Assim o
+ * modo maior de uma musica com bVII (C F G Bb) continua em C e nao escorrega
+ * para Cm, e um A no meio de C-dor NAO reescreve a tonalidade para A.
+ */
+const MAJOR_WEIGHTS: Record<number, number> = {
+  0: 1, 2: 1, 4: 1, 5: 1, 7: 1, 9: 1,
+  8: 0.35, 10: 0.35, 3: 0.35,
+  11: 0.2, 1: 0.15, 6: 0.15,
+};
+const MINOR_WEIGHTS: Record<number, number> = {
+  0: 1, 3: 1, 5: 1, 7: 1, 8: 1, 10: 1,
+  2: 0.25, 9: 0.25,
+  11: 0.15, 1: 0.15, 4: 0.15, 6: 0.15,
+};
+// Graus diatonicos em que o acorde espera ser MENOR (para penalizar o modo
+// trocado: "A maior" no lugar de "Am" em C maior pesa menos).
+const MAJOR_MINOR_DEGREES = new Set([2, 4, 9]);
+const MINOR_MINOR_DEGREES = new Set([0, 5]);
+// Em menor, 7 pode ser v (menor) ou V (maior): os dois sao normalisados.
+const MINOR_FLEX_DEGREES = new Set([7]);
+const QUALITY_MISMATCH = 0.55;
+const TONIC_BONUS = 0.5;
+
+function scoreKeyCandidate(
+  durations: Map<string, number>,
+  tonic: number,
+  mode: "major" | "minor",
+): number {
+  const weights = mode === "major" ? MAJOR_WEIGHTS : MINOR_WEIGHTS;
+  const minorDegrees = mode === "major" ? MAJOR_MINOR_DEGREES : MINOR_MINOR_DEGREES;
+  const wantsMinor = (relative: number) => {
+    if (mode === "minor" && MINOR_FLEX_DEGREES.has(relative)) return null; // v ou V servem
+    return minorDegrees.has(relative);
+  };
+  let score = 0;
+  for (const [name, duration] of durations) {
+    const identity = chordIdentity(name);
+    if (!identity) continue;
+    const relative = (((identity.root - tonic) % 12) + 12) % 12;
+    let factor = weights[relative] ?? 0.15;
+    const expectedMinor = wantsMinor(relative);
+    if (expectedMinor !== null && expectedMinor !== identity.minor) {
+      factor *= QUALITY_MISMATCH;
+    }
+    score += duration * factor;
+    if (relative === 0 && identity.minor === (mode === "minor")) {
+      score += duration * TONIC_BONUS;
+    }
+  }
+  return score;
 }
 
 function inferKeyFromSegments(
   segments: ChordSegment[],
+  provided?: { tonic: number; mode: "major" | "minor" },
 ): { tonic: number; mode: "major" | "minor" } | null {
   const duration = new Map<string, number>();
   for (const segment of segments) {
@@ -708,18 +814,64 @@ function inferKeyFromSegments(
   let bestScore = -Infinity;
   for (let tonic = 0; tonic < 12; tonic++) {
     for (const mode of ["major", "minor"] as const) {
-      const set = diatonicChordNames(tonic, mode);
-      let score = 0;
-      for (const [name, value] of duration) if (set.has(name)) score += value;
-      const tonicName = NOTE_NAMES[tonic] + (mode === "minor" ? "m" : "");
-      score += (duration.get(tonicName) ?? 0) * 0.5;
+      const score = scoreKeyCandidate(duration, tonic, mode);
       if (score > bestScore) {
         bestScore = score;
         best = { tonic, mode };
       }
     }
   }
+
+  // O palpite do perfil de croma (Krumhansl) so perde se o candidato tiver
+  // pontuacao bem melhor: evita trocar de tonalidade por causa de uma
+  // classificacao ruidosa.
+  if (provided && best) {
+    const providedScore = scoreKeyCandidate(duration, provided.tonic, provided.mode);
+    // 1.35: so troca o tom da analise quando o candidato ganha folgado. Com
+    // 1.15, um C G Bb F (Dor maior empresta bVII) migrava para Fa maior e as
+    // classificacoes vinham erradas (G virava Gm).
+    if (providedScore >= bestScore * 1.35) return provided;
+  }
   return best;
+}
+
+/**
+ * Alinha as bordas dos acordes ao pulso: o classificador passa de acorde em
+ * milissegundos estranhos (1335 ms, 2,18 s...) e a parte ficaria com simbolos
+ * desalinhados das barras. Se a fronteira cai perto de um tempo da grade
+ * (dentro de 22% de um pulso), ela e movida para o tempo exato.
+ */
+function snapChordsToBeats(segments: ChordSegment[], timing?: ChordTiming): ChordSegment[] {
+  const bpm = timing?.bpm ?? 0;
+  if (!bpm || bpm <= 0 || segments.length === 0) return segments;
+  const beat = 60 / bpm;
+  const offset = timing?.beatOffset ?? 0;
+  const tolerance = 0.3 * beat;
+
+  // Somente bordas internas: o inicio do primeiro segmento fica onde a musica
+  // comeca, e aqui gini o merge sempre em 0.
+  const snapped: ChordSegment[] = segments.map((segment) => ({ ...segment }));
+  for (let i = 1; i < snapped.length; i++) {
+    const boundary = snapped[i].start;
+    const index = Math.round((boundary - offset) / beat);
+    if (!Number.isFinite(index)) continue;
+    const target = offset + index * beat;
+    if (target <= 0.02 || Math.abs(target - boundary) > tolerance) continue;
+    snapped[i - 1].end = target;
+    snapped[i].start = target;
+  }
+
+  // Descarta fronteiras que se cruzaram; o final de cada pedaco acompanha o
+  // comeco do proximo, e vizinhos iguais voltam a ficar juntos.
+  const cleaned: ChordSegment[] = [];
+  for (const segment of snapped) {
+    const previous = cleaned[cleaned.length - 1];
+    if (previous && previous.chord === segment.chord) previous.end = segment.end;
+    else if (segment.end > segment.start + 1e-4) cleaned.push(segment);
+    else if (previous) previous.end = Math.max(previous.end, segment.end);
+  }
+  for (let i = 1; i < cleaned.length; i++) cleaned[i - 1].end = cleaned[i].start;
+  return cleaned;
 }
 
 export function analyzeChords(
@@ -727,6 +879,8 @@ export function analyzeChords(
   right: Float32Array,
   sampleRate: number,
   key?: { tonic: number; mode: "major" | "minor" },
+  timing?: ChordTiming,
+  debug?: { timeline: { time: number; base: string; keyed: string }[]; effectiveKey: string | null },
 ): ChordSegment[] {
   const signal = toMono(left, right);
   const fftSize = 4096;
@@ -741,6 +895,7 @@ export function analyzeChords(
   const nyquist = sampleRate / 2;
 
   const frameChroma: Float32Array[] = [];
+  const frameBass: Float32Array[] = [];
   const energies = new Float32Array(frames);
 
   for (let f = 0; f < frames; f++) {
@@ -755,6 +910,7 @@ export function analyzeChords(
     energies[f] = energy;
     if (energy <= 1e-7) {
       frameChroma.push(new Float32Array(12));
+      frameBass.push(new Float32Array(12));
       continue;
     }
 
@@ -789,52 +945,87 @@ export function analyzeChords(
         chroma[note % 12] += peak / h;
       }
     }
+    frameChroma.push(applyChromaNorm(chroma));
 
-    let norm = 0;
-    for (let i = 0; i < 12; i++) norm += chroma[i];
-    if (norm > 0) for (let i = 0; i < 12; i++) chroma[i] /= norm;
-    frameChroma.push(chroma);
+    // Croma grave separado (A1..G3): e onde vive o baixo. Fundamentais de
+    // acorde aparecem aqui com muito mais forca do que na regiao do canto.
+    const bassChroma = new Float32Array(12);
+    for (let note = 33; note <= 55; note++) {
+      const f0 = 440 * Math.pow(2, (note - 69) / 12);
+      for (let h = 1; h <= 2; h++) {
+        const freq = f0 * h;
+        if (freq >= nyquist - 50) break;
+        const center = Math.round((freq * fftSize) / sampleRate);
+        let peak = 0;
+        for (let d = -1; d <= 1; d++) {
+          const bin = center + d;
+          if (bin > 0 && bin < half) peak = Math.max(peak, whitened[bin]);
+        }
+        bassChroma[note % 12] += peak / h;
+      }
+    }
+    frameBass.push(applyChromaNorm(bassChroma));
   }
 
-  const gate = percentile(energies, 0.25);
+  // Portao mais baixo (8o percentil): o antigo 25% cortava trechos apenas mais
+  // leves (introducoes, ultima nota de um vazio) e virava "N", empurrando o
+  // simbolo do proximo acorde para o meio do compasso.
+  const gate = percentile(energies, 0.08);
 
   const smoothFrames = Math.max(1, Math.round((0.4 * sampleRate) / hop));
   const smoothed: Float32Array[] = new Array(frames);
+  const smoothedBass: Float32Array[] = new Array(frames);
   for (let f = 0; f < frames; f++) {
     const acc = new Float32Array(12);
+    const bass = new Float32Array(12);
     let count = 0;
     for (let j = Math.max(0, f - smoothFrames); j <= Math.min(frames - 1, f + smoothFrames); j++) {
-      const frame = frameChroma[j];
-      for (let i = 0; i < 12; i++) acc[i] += frame[i];
+      for (let i = 0; i < 12; i++) {
+        acc[i] += frameChroma[j][i];
+        bass[i] += frameBass[j][i];
+      }
       count++;
     }
-    if (count > 0) for (let i = 0; i < 12; i++) acc[i] /= count;
-    let norm = 0;
-    for (let i = 0; i < 12; i++) norm += acc[i];
-    if (norm > 0) for (let i = 0; i < 12; i++) acc[i] /= norm;
-    smoothed[f] = acc;
+    if (count > 0) {
+      for (let i = 0; i < 12; i++) {
+        acc[i] /= count;
+        bass[i] /= count;
+      }
+    }
+    smoothed[f] = applyChromaNorm(acc);
+    smoothedBass[f] = applyChromaNorm(bass);
   }
 
   const windowFrames = Math.max(3, Math.round((1.5 * sampleRate) / hop));
 
   const baseTemplates = buildChordTemplates();
-  const baseSegments = labelsToSegments(
-    classifyLabels(smoothed, energies, gate, baseTemplates, windowFrames),
-    baseTemplates,
-    hop,
-    sampleRate,
-  );
+  const baseLabels = classifyLabels(smoothed, smoothedBass, energies, gate, baseTemplates, windowFrames);
+  const baseSegments = labelsToSegments(baseLabels, baseTemplates, hop, sampleRate);
 
-  const effectiveKey = inferKeyFromSegments(baseSegments) ?? key;
-  if (!effectiveKey) return mergeChordSegments(baseSegments, 1.0);
+  const effectiveKey = inferKeyFromSegments(baseSegments, key) ?? key;
+  let segments = baseSegments;
+  let keyedLabels = baseLabels;
+  let keyTemplates = baseTemplates;
+  if (effectiveKey) {
+    keyTemplates = buildChordTemplates(effectiveKey);
+    keyedLabels = classifyLabels(smoothed, smoothedBass, energies, gate, keyTemplates, windowFrames);
+    segments = labelsToSegments(keyedLabels, keyTemplates, hop, sampleRate);
+  }
 
-  const keyTemplates = buildChordTemplates(effectiveKey);
-  const segments = labelsToSegments(
-    classifyLabels(smoothed, energies, gate, keyTemplates, windowFrames),
-    keyTemplates,
-    hop,
-    sampleRate,
-  );
+  if (debug) {
+    debug.effectiveKey = effectiveKey ? NOTE_NAMES[effectiveKey.tonic] + (effectiveKey.mode === "minor" ? "m" : "") : null;
+    for (let f = 0; f < frames; f++) {
+      debug.timeline.push({
+        time: (f * hop) / sampleRate,
+        base: baseLabels[f] < 0 ? "N" : baseTemplates[baseLabels[f]].name,
+        keyed: keyedLabels[f] < 0 ? "N" : keyTemplates[keyedLabels[f]]?.name ?? "?",
+      });
+    }
+  }
 
-  return mergeChordSegments(segments, 1.0);
+  if (!effectiveKey) {
+    return snapChordsToBeats(mergeChordSegments(baseSegments, 1.0), timing);
+  }
+
+  return snapChordsToBeats(mergeChordSegments(segments, 1.0), timing);
 }

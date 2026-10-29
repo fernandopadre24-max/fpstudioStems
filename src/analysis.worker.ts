@@ -1,5 +1,6 @@
 import { analyzeAudio, analyzeChords } from "./lib/analysis-core";
 import { extractMelody } from "./lib/melody-core";
+import type { ChordTiming } from "./lib/analysis-core";
 import {
   analyzeVoiceStats,
   morphVoice,
@@ -13,6 +14,7 @@ interface AnalyzeRequest {
   right: Float32Array;
   sampleRate: number;
   key?: { tonic: number; mode: "major" | "minor" };
+  timing?: ChordTiming;
   stats?: VoiceStats;
   plan?: VoicePlan;
 }
@@ -22,7 +24,7 @@ const post = (message: unknown, transfer?: Transferable[]) => {
 };
 
 self.onmessage = (event: MessageEvent<AnalyzeRequest>) => {
-  const { mode = "analysis", left, right, sampleRate, key, stats, plan } = event.data;
+  const { mode = "analysis", left, right, sampleRate, key, timing, stats, plan } = event.data;
 
   if (mode === "voice-stats") {
     post({ type: "voice-stats", stats: analyzeVoiceStats(left, right, sampleRate) });
@@ -46,7 +48,7 @@ self.onmessage = (event: MessageEvent<AnalyzeRequest>) => {
 
   const result =
     mode === "chords"
-      ? analyzeChords(left, right, sampleRate, key)
+      ? analyzeChords(left, right, sampleRate, key, timing)
       : mode === "melody"
         ? extractMelody(left, right, sampleRate)
         : analyzeAudio(left, right, sampleRate);

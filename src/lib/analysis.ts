@@ -1,8 +1,8 @@
 import { SAMPLE_RATE } from "./constants";
-import type { ChordSegment, TrackAnalysis } from "./analysis-core";
+import type { ChordSegment, ChordTiming, TrackAnalysis } from "./analysis-core";
 import type { MelodyResult } from "./melody-core";
 
-export type { TrackAnalysis, KeyEstimate, ChordSegment } from "./analysis-core";
+export type { TrackAnalysis, KeyEstimate, ChordSegment, ChordTiming } from "./analysis-core";
 export type { MelodyNote, MelodyResult } from "./melody-core";
 
 function runWorker<T>(
@@ -11,6 +11,7 @@ function runWorker<T>(
   right: Float32Array,
   sampleRate: number,
   key?: { tonic: number; mode: "major" | "minor" },
+  timing?: ChordTiming,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("../analysis.worker.ts", import.meta.url), {
@@ -29,7 +30,7 @@ function runWorker<T>(
     };
 
     worker.postMessage(
-      { mode, left: leftCopy, right: rightCopy, sampleRate, key },
+      { mode, left: leftCopy, right: rightCopy, sampleRate, key, timing },
       [leftCopy.buffer, rightCopy.buffer],
     );
   });
@@ -48,8 +49,9 @@ export function analyzeChords(
   right: Float32Array,
   sampleRate: number = SAMPLE_RATE,
   key?: { tonic: number; mode: "major" | "minor" },
+  timing?: ChordTiming,
 ): Promise<ChordSegment[]> {
-  return runWorker<ChordSegment[]>("chords", left, right, sampleRate, key);
+  return runWorker<ChordSegment[]>("chords", left, right, sampleRate, key, timing);
 }
 
 export function analyzeMelody(

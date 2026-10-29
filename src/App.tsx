@@ -1487,7 +1487,12 @@ export default function App() {
     if (!decoded || chords) return;
     setChordsLoading(true);
     try {
-      setChords(await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key));
+      setChords(
+        await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key, {
+          bpm: analysis?.bpm,
+          beatOffset: analysis?.beatOffset,
+        }),
+      );
     } catch {
       setChords([]);
     } finally {
@@ -1611,7 +1616,10 @@ export default function App() {
         let chordSegments = chords;
         if (!chordSegments) {
           try {
-            chordSegments = await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key);
+            chordSegments = await analyzeChords(decoded.left, decoded.right, undefined, analysis?.key, {
+              bpm: analysis?.bpm,
+              beatOffset: analysis?.beatOffset,
+            });
             setChords(chordSegments);
           } catch {
             chordSegments = null;
