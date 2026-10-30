@@ -693,23 +693,29 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
 
   // Transporte de oitava: o leitor de melodia costuma travar o cantor uma
   // oitava abaixo (o vibrato/sub-harmonico confundem a raiz) e a pauta sai
-  // inteira em linhas suplementares de baixo. Centralizar a mediana no corpo
-  // da pauta, trocando so oitavas inteiras, mantem a musica identica (os
-  // intervalos nao mudam) — so a leitura fica confortavel.
+  // inteira em linhas suplementares de baixo. Escolhe a oitava que MINIMIZA
+  // as notas fora do corpo da pauta, com notas abaixo pesando mais (sao as
+  // piores de ler). Trocar so oitavas inteiras mantem a musica identica.
   const referenceMedian = options.medianMidi ?? 0;
   let octaves = 0;
-  if (referenceMedian > 0) {
-    if (referenceMedian < 48) {
-      // Pauta de baixo: centro ~ MIDI 50 (linha central da pauta de F).
-      while (referenceMedian + octaves * 12 < 40) octaves += 1;
-      while (referenceMedian + octaves * 12 > 52) octaves -= 1;
-    } else {
-      // Pauta de cima: centro ~ MIDI 67 (linha central da pauta de G).
-      // 62 (D4) de piso: medianas em C4 ou abaixo ficariam metade fora da
-      // pauta por baixo, o "muito nos graves" do leitor travado uma oitava
-      // abaixo — sobem uma oitava inteira.
-      while (referenceMedian + octaves * 12 < 62) octaves += 1;
-      while (referenceMedian + octaves * 12 > 73) octaves -= 1;
+  if (referenceMedian > 0 && cleaned.length > 0) {
+    const midis = cleaned.map((note) => note.midi);
+    // Corpo da pauta: treble vai de Mi (64, 1a linha) a Fa (77, 5a linha);
+    // deixar tocar ate Si (83) por cima (pena 1x) e notas abaixo da pauta
+    // pesam 3x — e o lado de baixo que atrapalha a leitura.
+    const [lo, hi] = referenceMedian < 48 ? [43, 62] : [64, 83];
+    let bestPenalty = Infinity;
+    for (let candidate = -4; candidate <= 4; candidate++) {
+      let penalty = 0;
+      for (const midi of midis) {
+        const value = midi + candidate * 12;
+        if (value < lo) penalty += 3 * (lo - value);
+        else if (value > hi) penalty += value - hi;
+      }
+      if (penalty < bestPenalty) {
+        bestPenalty = penalty;
+        octaves = candidate;
+      }
     }
     if (octaves !== 0) {
       const delta = octaves * 12;
