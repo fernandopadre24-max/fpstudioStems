@@ -690,6 +690,32 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
   // serve para limpar as faiscas e para o caso de nao haver analise.
   const bpm = estimateMelodyTempo(notes, baseBpm);
   const cleaned = cleanMelody(notes, 60 / bpm / 4);
+
+  // Transporte de oitava: o leitor de melodia costuma travar o cantor uma
+  // oitava abaixo (o vibrato/sub-harmonico confundem a raiz) e a pauta sai
+  // inteira em linhas suplementares de baixo. Centralizar a mediana no corpo
+  // da pauta, trocando so oitavas inteiras, mantem a musica identica (os
+  // intervalos nao mudam) — so a leitura fica confortavel.
+  const referenceMedian = options.medianMidi ?? 0;
+  let octaves = 0;
+  if (referenceMedian > 0) {
+    if (referenceMedian < 48) {
+      // Pauta de baixo: centro ~ MIDI 50 (linha central da pauta de F).
+      while (referenceMedian + octaves * 12 < 40) octaves += 1;
+      while (referenceMedian + octaves * 12 > 52) octaves -= 1;
+    } else {
+      // Pauta de cima: centro ~ MIDI 67 (linha central da pauta de G).
+      // 62 (D4) de piso: medianas em C4 ou abaixo ficariam metade fora da
+      // pauta por baixo, o "muito nos graves" do leitor travado uma oitava
+      // abaixo — sobem uma oitava inteira.
+      while (referenceMedian + octaves * 12 < 62) octaves += 1;
+      while (referenceMedian + octaves * 12 > 73) octaves -= 1;
+    }
+    if (octaves !== 0) {
+      const delta = octaves * 12;
+      for (const note of cleaned) note.midi += delta;
+    }
+  }
   const forced =
     options.beatsPerBar && options.beatType
       ? { beatsPerBar: options.beatsPerBar, beatType: options.beatType }
@@ -848,7 +874,7 @@ export function buildScore(notes: MelodyNote[], options: ScoreOptions = {}): Sco
   }
 
   const medianMidi = options.medianMidi ?? 0;
-  const clef: "treble" | "bass" = medianMidi > 0 && medianMidi < 52 ? "bass" : "treble";
+  const clef: "treble" | "bass" = medianMidi > 0 && medianMidi < 48 ? "bass" : "treble";
 
   return {
     measures,
